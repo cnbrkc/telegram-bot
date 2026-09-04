@@ -3,8 +3,8 @@ import streamlit as st
 from telethon import TelegramClient, events
 
 # ===== BURAYA KENDİ BİLGİLERİNİ GİR =====
-API_ID = 1234567       # my.telegram.org'dan aldığın sayı
-API_HASH = "buraya_hash_gel"  # my.telegram.org'dan aldığın hash
+API_ID = 32846617       # my.telegram.org'dan aldığın sayı
+API_HASH = "eb3f9f854a5a0b4f7e3e24a7de74d20d"  # my.telegram.org'dan aldığın hash
 # ========================================
 
 # Oturum dosyası (session) oluşturur, her seferinde giriş yapmazsın
