@@ -2,7 +2,7 @@ name: Keep Alive
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Her 6 saatte bir çalışır
+    - cron: '0 */3 * * *'  # Her 6 saatte bir çalışır
 
 jobs:
   ping:
@@ -10,4 +10,4 @@ jobs:
     steps:
       - name: Ping Streamlit App
         run: |
-          curl -I https://telegram-bot-xxxxx.streamlit.app
+          curl -I https://tg-indirim.streamlit.app/
