@@ -20,14 +20,14 @@ async def start_bot():
     async def handler(event):
         # ===== FİLTRELEME AYARLARI (İstediğin gibi değiştir) =====
         # Sadece şu kelimeleri içeren mesajları yakala
-        anahtar_kelimeler = ["merhaba", "test", "yardım"]
+        anahtar_kelimeler = ["5070ti", "msi", "bilgisayar"]
         
         mesaj = event.raw_text.lower()
         if any(kelime in mesaj for kelime in anahtar_kelimeler):
             # Mesajı geldiği sohbete cevap olarak gönder
             await event.reply("🔔 Mesajını aldım! Konuyla ilgileniyorum.")
             # Ayrıca kendi özel sohbetine de yönlendirebilirsin
-            # await client.send_message("kullanici_adi", f"Yeni mesaj: {event.raw_text}")
+            # await client.send_message("xxx909090909090", f"Yeni mesaj: {event.raw_text}")
         # ========================================================
     
     await client.run_until_disconnected()
