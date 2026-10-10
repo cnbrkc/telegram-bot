@@ -1175,7 +1175,7 @@ class NotificationTest(unittest.TestCase):
     # --- yeni biçim ---------------------------------------------------------
 
     def test_notification_is_the_message_itself_plus_message_link(self):
-        """Sabit düzen: başlık → 💰 fiyat → kalan kaynak satırları → Mesajı Gör → kaynak adı."""
+        """Yeni sıra: başlık → 💰 fiyat → Mesajı Gör → kalan satırlar → en altta kaynak adı."""
         client = self._run({"notify_bot_token": "123:ABC"})
         text = "Sıcak ÇAY 5 TL\nKaçırılmayacak fırsat!"
         self._send(client, text)
@@ -1185,9 +1185,10 @@ class NotificationTest(unittest.TestCase):
         self.assertEqual(call["chat_id"], GROUP_ID)
         blocks = call["caption"].split("\n\n")
         self.assertEqual(blocks[:3], [
-            "Sıcak ÇAY", "💰Fiyat: 5 TL", "Kaçırılmayacak fırsat!",
+            "Sıcak ÇAY", "💰Fiyat: 5 TL", "🔗 Mesajı Gör: https://t.me/firsatz/1",
         ])
-        self.assertEqual(blocks[-2], "🔗 Mesajı Gör: https://t.me/firsatz/1")
+        self.assertEqual(blocks[-2], "Kaçırılmayacak fırsat!",
+                         "bloklara giremeyen satır Mesajı Gör'ün altında kalır")
         self.assertEqual(blocks[-1], "firsatz")
         self.assertTrue(call["caption"].endswith("firsatz"), call["caption"])
         self.assertNotIn("Fırsatı Gönderen", call["caption"], "etiket yazılmaz")
@@ -1196,7 +1197,7 @@ class NotificationTest(unittest.TestCase):
         self.assertEqual(call["filename"], "firsat_1.jpg")
 
     def test_real_world_offer_uses_the_fixed_order_without_duplicates(self):
-        """Kullanıcı isteği: başlık → 💰 fiyat → 🔗 link → kalan satırlar → Mesajı Gör → kaynak."""
+        """Kullanıcı isteği: başlık → 💰 fiyat → 🔗 link → Mesajı Gör → kalan satırlar → kaynak."""
         client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
                             "include_keywords": []})
         text = (
@@ -1213,8 +1214,8 @@ class NotificationTest(unittest.TestCase):
             "Banyo ve Duş Jeli 500ml x 4 Adet"
             "\n\n💰Fiyat: 225 TL"
             "\n\n🔗 https://link.amazon/B02W5SjPe"
-            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
             "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
             "\n\nfirsatz"
         ))
         delivered = self.calls[0]["text"]
@@ -1242,10 +1243,10 @@ class NotificationTest(unittest.TestCase):
             "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
             "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
             "\n\n🔗 https://onu.al/feMF"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
             "\n\n💬 Ortalama fiyatın %31 altında"
             "\n\n📂 Süpermarket"
             "\n\n🛍️ Amazon"
-            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
             "\n\nfirsatz"
         ))
         self.assertNotIn("🏷️", delivered, "fiyat etiketi tüketilir")
@@ -2117,8 +2118,10 @@ class DedupFlowTest(MainHarness, unittest.TestCase):
         blocks = text.split("\n\n")
         self.assertEqual(blocks[0], "Sıcak ÇAY")
         self.assertEqual(blocks[1], "💰Fiyat: 5 TL")
-        badge_head = "✅ 2 kaynakta paylaşıldı · teyitli fırsat"
-        self.assertEqual(blocks[2], badge_head, "teyit rozeti fiyatın altına gelmeli")
+        badge_head = "📌 2 kere paylaşıldı: firsatz"
+        self.assertEqual(blocks[-1], f"firsatz\n{badge_head}",
+                         "çoklu paylaşım notu son bloğu kapatır")
+        self.assertTrue(text.endswith(badge_head), text)
         self.assertNotIn("Sıcak ÇAY 5 TL", text,
                          "alınan başlık/fiyat satırı gövdede tekrarlanmaz")
         formatting = kwargs["formatting_entities"]
@@ -2151,7 +2154,10 @@ class DedupFlowTest(MainHarness, unittest.TestCase):
         blocks = text.split("\n\n")
         self.assertEqual(blocks[0], "Philips Airfryer XXL 6.2L")
         self.assertEqual(blocks[1], "💰Fiyat: 1.299 TL")
-        self.assertTrue(blocks[2].startswith("✅ 2 kaynakta paylaşıldı"))
+        badge_line = text.splitlines()[-1]
+        self.assertTrue(badge_line.startswith("📌 2 kere paylaşıldı:"), badge_line)
+        self.assertIn("firsatz", badge_line, "ilk grubun adı yazılır")
+        self.assertIn(str(second_source_id), badge_line, "ikinci grubun adı da yazılır")
 
     def test_third_copy_escalates_badge_without_stacking(self):
         self._send("Sıcak ÇAY 5 TL")
@@ -2165,21 +2171,21 @@ class DedupFlowTest(MainHarness, unittest.TestCase):
         blocks = text.split("\n\n")
         self.assertEqual(blocks[0], "Sıcak ÇAY")
         self.assertEqual(blocks[1], "💰Fiyat: 5 TL")
-        self.assertTrue(blocks[2].startswith("🔥 3 kaynakta paylaşıldı"), text)
-        self.assertNotIn("✅ 2 kaynakta", text, "eski rozet yenisiyle değişmeli")
+        self.assertTrue(text.endswith("📌 3 kere paylaşıldı: firsatz"), text)
+        self.assertNotIn("2 kere paylaşıldı", text, "eski not yenisiyle değişmeli")
 
-    def test_badge_lists_no_source_names(self):
-        """Kullanıcı isteği: kaynak adları alt alta yazılmasın, tek satır kalsın."""
+    def test_badge_lists_the_source_names_in_the_last_block(self):
+        """Kullanıcı isteği: "2-3-4 kere paylaşıldı şu şu şu gruplarda" — en sonda, tek satır."""
         self._send("Sıcak ÇAY 5 TL")
         self._send("Sıcak ÇAY 5 TL")
         text = self.client.edited[0][2]
         blocks = text.split("\n\n")
         self.assertTrue(blocks[0].startswith("Sıcak ÇAY"))
         self.assertEqual(blocks[1], "💰Fiyat: 5 TL")
-        self.assertTrue(blocks[2].startswith("✅ 2 kaynakta paylaşıldı · teyitli fırsat"), text)
-        self.assertNotIn("📌", text)
+        badge = blocks[-1].splitlines()[-1]
+        self.assertEqual(badge, "📌 2 kere paylaşıldı: firsatz")
         self.assertNotIn("Kaynaklar:", text)
-        self.assertEqual(len(blocks[2].splitlines()), 1, "rozet tek satır olmalı")
+        self.assertEqual(text.count("kere paylaşıldı"), 1, "not tek satır, tek kez")
 
     def test_different_titles_send_separately(self):
         self._send("Sıcak ÇAY 5 TL")
@@ -2273,11 +2279,12 @@ class DedupPreloadTest(MainHarness, unittest.TestCase):
         self.assertEqual(client.delivered, [])
         self.assertEqual(bot.STATS["deduped"], 1)
         self.assertEqual(len(client.edited), 1)
-        self.assertEqual(client.edited[0][1], 777, "rozet eski mesaja işlenmeli")
-        self.assertTrue(client.edited[0][2].startswith("Çay 5 TL\n\n✅ 2 kaynakta"), client.edited[0][2])
+        self.assertEqual(client.edited[0][1], 777, "not eski mesaja işlenmeli")
+        self.assertTrue(client.edited[0][2].endswith("📌 2 kere paylaşıldı: firsatz"),
+                        client.edited[0][2])
 
-    def test_new_format_notification_is_indexed_and_badge_lands_under_price(self):
-        """Yeni biçim (💰 Fiyat / 🔗 link) de önbelleğe alınır; rozet fiyatın altına işlenir."""
+    def test_new_format_notification_is_indexed_and_badge_closes_the_message(self):
+        """Yeni biçim (💰 Fiyat / 🔗 link) de önbelleğe alınır; not en alta işlenir."""
         deal = (
             GROUP_ID,
             "Çay\n\n💰Fiyat: 5 TL\n\n🔗 Mesajı Gör: https://t.me/firsatz/9\n\nfirsatz",
@@ -2289,10 +2296,12 @@ class DedupPreloadTest(MainHarness, unittest.TestCase):
         self.assertEqual(client.delivered, [])
         self.assertEqual(bot.STATS["deduped"], 1)
         self.assertEqual(len(client.edited), 1)
-        self.assertEqual(client.edited[0][1], 778, "rozet eski mesaja işlenmeli")
-        self.assertIn("💰Fiyat: 5 TL\n\n✅ 2 kaynakta", client.edited[0][2])
+        self.assertEqual(client.edited[0][1], 778, "not eski mesaja işlenmeli")
+        self.assertIn("💰Fiyat: 5 TL", client.edited[0][2])
+        self.assertTrue(client.edited[0][2].endswith("📌 2 kere paylaşıldı: firsatz"),
+                        client.edited[0][2])
         self.assertEqual(bot.strip_dedup_badge(client.edited[0][2])[1], deal[1],
-                         "rozet geri sökülebilmeli (açılış taraması)")
+                         "not geri sökülebilmeli (açılış taraması)")
 
     def test_human_chatter_is_never_indexed(self):
         """İnsan sohbeti kayda alınmaz; fırsat kaçmasın diye temkinli taraf seçilir."""
@@ -2329,8 +2338,9 @@ class DedupPreloadTest(MainHarness, unittest.TestCase):
         self._send_and_settle(client, "Çay 5 TL")
         self.assertEqual(client.delivered, [])
         text = client.edited[-1][2]
-        self.assertTrue(text.startswith("Çay 5 TL\n\n🔥🔥 4 kaynakta paylaşıldı"), text)
-        self.assertNotIn("🔥 3 kaynakta", text)
+        self.assertTrue(text.startswith("Çay 5 TL"), text)
+        self.assertTrue(text.endswith("📌 4 kere paylaşıldı: firsatz"), text)
+        self.assertNotIn("🔥🔥 4 kaynakta", text, "eski rozet yeni biçime taşınır")
 
 
 class DedupBotBadgeTest(unittest.TestCase):
@@ -2434,8 +2444,10 @@ class DedupBotBadgeTest(unittest.TestCase):
         self.assertEqual(call["message_id"], self.media_calls[0]["message_id"])
         caption_blocks = call["caption"].split("\n\n")
         self.assertEqual(caption_blocks[0], "Çay fırsatı")
-        badge = "✅ 2 kaynakta paylaşıldı · teyitli fırsat"
-        self.assertEqual(caption_blocks[1], badge)
+        badge = "📌 2 kere paylaşıldı: firsatz"
+        self.assertTrue(call["caption"].endswith(badge), call["caption"])
+        self.assertEqual(caption_blocks[-1], f"firsatz\n{badge}",
+                         "çoklu paylaşım notu en alt bloğu kapatır")
         self.assertIn("Çay fırsatı", call["caption"])
         bold = next(entity for entity in call["entities"]
                     if bot.utf16_slice(call["caption"], entity["offset"], entity["length"]) == badge)
@@ -2454,7 +2466,8 @@ class DedupBotBadgeTest(unittest.TestCase):
         self.assertEqual(call["message_id"], self.ping_calls[0]["message_id"])
         text_blocks = call["text"].split("\n\n")
         self.assertEqual(text_blocks[0], "Çay fırsatı")
-        self.assertTrue(text_blocks[1].startswith("✅ 2 kaynakta paylaşıldı"), call["text"])
+        self.assertTrue(call["text"].endswith("📌 2 kere paylaşıldı: firsatz"), call["text"])
+        self.assertEqual(text_blocks[-1], "firsatz\n📌 2 kere paylaşıldı: firsatz")
 
     def test_third_copy_updates_bot_badge(self):
         client = self._run()
@@ -2467,5 +2480,5 @@ class DedupBotBadgeTest(unittest.TestCase):
         text = self.edit_text_calls[-1]["text"]
         text_blocks = text.split("\n\n")
         self.assertEqual(text_blocks[0], "Çay fırsatı")
-        self.assertTrue(text_blocks[1].startswith("🔥 3 kaynakta paylaşıldı"), text)
-        self.assertNotIn("✅ 2 kaynakta", text)
+        self.assertTrue(text.endswith("📌 3 kere paylaşıldı: firsatz"), text)
+        self.assertNotIn("2 kere paylaşıldı", text, "eski not yeni notla değiştirilir")
