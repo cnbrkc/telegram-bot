@@ -64,7 +64,7 @@ STATS = {
     "cleaned": 0,     # bildirim gittikten sonra silinen hesap kopyası
     "cleaned_commands": 0,  # komut sohbetinde silinen eski komut/yanıt mesajı
     "deduped": 0,     # aynı ürün sorgusuyla birleştirilen (yeniden gönderilmeyen) tekrar
-    "dedup_edits": 0,  # tekrarda ilk mesaja işlenen rozet güncellemesi
+    "dedup_edits": 0,  # tekrarda ilk mesaja işlenen çoklu paylaşım notu güncellemesi
     "last_match": None,
     "last_match_source": None,
     "source_seen": {},  # kaynak chat_id -> bu oturumda alınan canlı NewMessage sayısı
@@ -811,7 +811,7 @@ async def edit_bot_text(
 ) -> tuple[bool, str]:
     """Bildirim botunun gönderdiği bir metin mesajını yerinde günceller.
 
-    Tekrar birleştirmede ilk mesaja rozet ("3 kaynakta paylaşıldı" gibi)
+    Tekrar birleştirmede ilk mesaja çoklu paylaşım notu ("3 kere paylaşıldı: ...")
     işlerken kullanılır. Bot kendi mesajını düzenleyebilir; içerik değişmediyse
     Telegram "message is not modified" der, bu başarı sayılır.
     """
@@ -1591,7 +1591,12 @@ def _search_line_candidate(raw_line: str) -> str:
     return line
 
 
-def _search_query(obj: Any, limit: int = 200) -> str:
+# Arama sorgusu ve başlık en fazla bu uzunlukta tutulur; satır tüketimi de
+# (``_title_spans``) aynı sınırla karşılaştırır ki başlık satırı bulunabilsin.
+SEARCH_QUERY_LIMIT = 200
+
+
+def _search_query(obj: Any, limit: int = SEARCH_QUERY_LIMIT) -> str:
     """Farklı kaynak şablonlarından ürün adını bulup arama sorgusu kur.
 
     Fiyat/indirim satırları atlanır; başta fiyat/yüzde, sonda ürün linki olan
@@ -1607,13 +1612,69 @@ def _search_query(obj: Any, limit: int = 200) -> str:
 
 
 PRICE_LINE_LABEL = "Fiyat:"
+# Eski biçimin link etiketi; yalnızca geriye dönük tanıma için tutulur
+# (eski bildirimlerin tekrar önbelleği ve rozet konumu hâlâ okunabilir).
 PRODUCT_LINK_LABEL = "🔗 Ürün fırsat linki:"
+# Sabit bildirim düzeni (kullanıcı isteği): başlık → 💰Fiyat: <fiyat> → 🔗 <ürün linki>.
+MONEY_EMOJI = "💰"
+PRODUCT_LINK_PREFIX = "🔗"
+
+
+def is_price_line(line: str | None) -> bool:
+    """Satır bir fiyat satırı mı? Baştaki emoji/sembol (``💰``) hoş görülür.
+
+    Hem yeni biçim (``💰Fiyat: 225 TL``) hem eski biçimler (``💰 Fiyat: 225 TL``,
+    ``Fiyat: 225 TL``) tanınır; eski bildirimlerdeki rozetler bu satırın altında
+    aranır, yani geçmiş mesajlar da okunabilir kalır.
+    """
+    content = _LEADING_NOISE_RE.sub("", (line or "").strip())
+    return content.startswith(PRICE_LINE_LABEL)
+
+
+# Kupon/duyuru paylaşımlarında tutar geçebilir ("200 TL üzeri ... kupon") ama
+# bunlar ürün fiyatı değildir; o mesajlar biçime sokulmadan olduğu gibi gider.
+_COUPON_HINT_RE = re.compile(
+    r"\b(?:kupon\w*|(?:indirim|promosyon|hediye)\s*kodu?|coupon|voucher)\b",
+    re.IGNORECASE,
+)
+# "200 TL ve üzeri kargo bedava" bir fiyat değil, eşik ifadesidir.
+_PRICE_THRESHOLD_RE = re.compile(r"\s*(?:ve\s+)?(?:üzeri|üzerinde|üzerine)\b",
+                                 re.IGNORECASE)
+
+
+def _price_candidates(text: str) -> list[re.Match[str]]:
+    """Fiyat olabilecek eşleşmeleri ver; aldatıcı olanları ele.
+
+    Elenenler: URL içindeki sayı/para birimi dizileri (``…/1299-TL-deal``),
+    kupon satırındaki tutarlar (``200 TL üzeri ... kupon``) ve eşik ifadeleri
+    (``200 TL ve üzeri kargo bedava``). Böylece hem başlık fiyatı doğru seçilir
+    hem de kupon paylaşımları yanlışlıkla "ürün fiyatı" sayılmaz.
+    """
+    body = text or ""
+    url_spans = _merge_spans(
+        (match.start(), match.start() + len(match.group(0).rstrip(_URL_TAIL_TRIM)))
+        for match in URL_RE.finditer(body)
+    )
+    matches: list[re.Match[str]] = []
+    for match in _SEARCH_PRICE_RE.finditer(body):
+        if _spans_overlap((match.start(), match.end()), url_spans):
+            continue
+        line_end = body.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(body)
+        line_start = body.rfind("\n", 0, match.start()) + 1
+        if _COUPON_HINT_RE.search(body[line_start:line_end]):
+            continue
+        if _PRICE_THRESHOLD_RE.match(body, match.end()):
+            continue
+        matches.append(match)
+    return matches
 
 
 def extract_offer_price(obj: Any) -> str | None:
-    """Kaynak mesajdaki ilk açık para birimli fiyatı aynen çıkar."""
-    match = _SEARCH_PRICE_RE.search(message_text(obj))
-    return match.group(0).strip() if match else None
+    """Kaynak mesajdaki ilk gerçek fiyatı aynen çıkar (bkz. ``_price_candidates``)."""
+    matches = _price_candidates(message_text(obj))
+    return matches[0].group(0).strip() if matches else None
 
 
 def _price_search_service(url: str, label: str = "") -> str | None:
@@ -1692,6 +1753,19 @@ def extract_product_offer_link(obj: Any) -> str | None:
     return max(candidates)[2]
 
 
+# Cimri, Cloudflare korumalı: uzun ve özel karakterli sorgu dizeleri WAF
+# tarafından bloklanabiliyor ("Sorry, you have been blocked"). Kullanıcı
+# isteğiyle Cimri sorgusu ilk iki kelimeye iner; Google Alışveriş ve Akakçe
+# tam sorguyu kullanmaya devam eder.
+CIMRI_QUERY_WORDS = 2
+
+
+def _cimri_search_query(query: str) -> str:
+    """Cimri için kısa sorgu: başlığın ilk ``CIMRI_QUERY_WORDS`` kelimesi."""
+    words = WORD_TOKEN_RE.findall(query or "")
+    return " ".join(words[:CIMRI_QUERY_WORDS])
+
+
 def _price_search_url(service: str, query: str) -> str:
     """Ürün arama adresini kur (query başlık ayıklayıcısından gelir)."""
     query = " ".join((query or "").split())
@@ -1705,7 +1779,9 @@ def _price_search_url(service: str, query: str) -> str:
     if service == "cimri":
         # Cimri'nin arama sonuç sayfası bu yapıyı kullanıyor. Fiyat artan
         # sıralaması en ucuz teklifi üste taşır; virgül URL'de sabit bırakılır.
-        return "https://www.cimri.com/arama?sort=price,asc&q=" + urllib.parse.quote_plus(query)
+        # Sorgu kısadır: uzun ürün adları WAF bloğunu tetikliyor (bkz. yukarı).
+        short = _cimri_search_query(query) or query
+        return "https://www.cimri.com/arama?sort=price,asc&q=" + urllib.parse.quote_plus(short)
     raise ValueError(f"Bilinmeyen fiyat arama hizmeti: {service}")
 
 
@@ -1761,6 +1837,428 @@ def build_inline_keyboard(obj: Any) -> dict | None:
     return {"inline_keyboard": rows} if rows else None
 
 
+# --- Sabit düzen: başlık/fiyat/link kaynaktan ALINIR, alındığı yerden SİLİNİR --
+# Kullanıcı isteği: bildirim her fırsatta aynı düzenle gelsin; ürün özeti ile
+# kaynak mesaj aynı bilgiyi iki kez yazmasın. Başlık, fiyat ve ürün linki
+# kaynak mesajdan alınır ve ALINDIKLARI satırlardan silinir; biçim gereği
+# alınmayan satırlar (örn. "🗓️ 365 Günün En Düşük Fiyatı") altta aynen
+# korunur. Böylece ne tekrar ne veri kaybı olur.
+# Tüketilen değerden sonra satırda yalnızca bu köklerden sözcükler kalıyorsa
+# satır etiket/CTA artığıdır ve tümüyle düşer ("💰 Fiyat : 225 TL" → "",
+# "🛒 https://..." → "", "Fırsata Git" → ""). Anlam taşıyan tek bir sözcük
+# satırı korur ("Sepette 5.999,90 TL" → "Sepette"): veri kaybı yok.
+_RESIDUE_SCAFFOLD_ROOTS = (
+    "fiyat", "price", "fiyatl",
+    "indirim", "discount", "oran", "yüzde", "yuzde", "percent",
+    "fırsat", "firsat", "link", "ürün", "urun",
+    "tl", "try", "ytl", "usd", "eur",
+    "al", "bak", "git", "gor", "gör", "incele", "tikla", "tıkla",
+)
+
+
+def _removed_ranges(total: int, kept_indexes: Sequence[int]) -> list[tuple[int, int]]:
+    """Korunan karakter indekslerinin dışında kalan bitişik aralıkları ver."""
+    kept = set(kept_indexes)
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for index in range(total):
+        if index in kept:
+            if start is not None:
+                ranges.append((start, index))
+                start = None
+        elif start is None:
+            start = index
+    if start is not None:
+        ranges.append((start, total))
+    return ranges
+
+
+_RESIDUE_TRIM_CHARS = " \t:;,./\\|·•-–—"
+
+
+def _trim_scaffold_edges(line_text: str, kept: list[int]) -> list[int]:
+    """Tüketimden arta kalan etiket/ayraç artıklarını kırp.
+
+    Sol taraf: ``💰 Fiyat : / 3 adet alımda 64 TL`` → ``3 adet alımda 64 TL``
+    (tüketilen fiyatın etiketi de onunla birlikte gider). Sağ taraf:
+    ``... burada .`` → ``... burada``. Anlam taşıyan içerik varsa korunur;
+    yalnızca etiket/ayraç kaldıysa liste boşalır ve satır tümüyle düşer.
+    """
+    kept_text = "".join(line_text[index] for index in kept)
+    cut = 0
+    while True:
+        start = cut
+        while cut < len(kept_text) and not kept_text[cut].isalnum():
+            cut += 1  # baştaki emoji/ayraç
+        while True:
+            match = WORD_TOKEN_RE.match(kept_text, cut)
+            if not match or not _word_matches(match.group(0), _RESIDUE_SCAFFOLD_ROOTS):
+                break
+            cut = match.end()
+            while cut < len(kept_text) and kept_text[cut] in _RESIDUE_TRIM_CHARS:
+                cut += 1  # etiketten sonraki ayraçlar
+        if cut == start:
+            break
+    end = len(kept_text)
+    while end and kept_text[end - 1] in " \t":
+        end -= 1
+    while end >= 2 and kept_text[end - 2] in " \t" \
+            and kept_text[end - 1] in ":;,./\\|·•-–—":
+        end -= 2  # başıboş kalan kapanış noktalaması
+    if end <= cut:
+        return []
+    return kept[cut:end]
+
+
+def _squeeze_line(
+    line_text: str, spans: Sequence[tuple[int, int]],
+) -> tuple[str, list[tuple[int, int]]]:
+    """Tüketilen aralıkları satırdan çıkar; artakalan etiket/boşlukları kırp.
+
+    Dönen ikinci değer, **özgün** satır koordinatlarında silinen aralıklardır;
+    entity offset'leri bunlarla taşınır.
+    """
+    dropped = [False] * len(line_text)
+    for start, end in spans:
+        for index in range(max(0, start), min(len(line_text), end)):
+            dropped[index] = True
+        # Tüketilen parçanın hemen ardındaki noktalama da onunla gider
+        # ("... burada 9 TL." → "... burada").
+        index = end
+        while index < len(line_text) and line_text[index] in ".,;:!?…":
+            dropped[index] = True
+            index += 1
+    kept: list[int] = []
+    for index, char in enumerate(line_text):
+        if dropped[index]:
+            continue
+        if char in " \t" and (not kept or line_text[kept[-1]] in " \t"):
+            continue  # baştaki ve çoklu boşluklar kırpılır
+        kept.append(index)
+    kept = _trim_scaffold_edges(line_text, kept)
+    new_text = "".join(line_text[index] for index in kept)
+    return new_text, _removed_ranges(len(line_text), kept)
+
+
+def _is_scaffold_residue(residue: str) -> bool:
+    """Artık yalnızca fiyat/link/CTA etiketlerinden mi oluşuyor? (Boş artık da düşer.)"""
+    words = WORD_TOKEN_RE.findall(URL_RE.sub(" ", residue or ""))
+    return all(_word_matches(word, _RESIDUE_SCAFFOLD_ROOTS) for word in words)
+
+
+def _locate_title_spans(content: str, title: str) -> list[tuple[int, int]]:
+    """Başlığı satır içinde bul; boşluk farklarını hoş gör, aralıkları ver."""
+    if not title:
+        return []
+    index = content.find(title)
+    if index >= 0:
+        return [(index, index + len(title))]
+    pattern = re.compile(r"\s+".join(re.escape(token) for token in title.split()))
+    match = pattern.search(content)
+    if match:
+        return [(match.start(), match.end())]
+    # Başlık satırın içinden parça parça süzülmüşse (örn. araya fiyat girmiş)
+    # kelime kelime bul: tüketim yine yalnızca alınan yerde olur.
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for token in WORD_TOKEN_RE.findall(title):
+        found = content.find(token, cursor)
+        if found < 0:
+            found = content.find(token)
+        if found < 0:
+            continue
+        spans.append((found, found + len(token)))
+        cursor = found + len(token)
+    return spans
+
+
+def _title_spans(text: str, title: str) -> list[tuple[int, int]]:
+    """Başlığın ALINDIĞI satırı bul; satır içindeki başlık aralıklarını ver."""
+    if not title:
+        return []
+    offset = 0
+    for raw_line in (text or "").splitlines(keepends=True):
+        content = raw_line.rstrip("\r\n")
+        # ``_search_query`` başlığı bu sınırla kısaltır; karşılaştırma da öyle olmalı.
+        candidate = _search_line_candidate(content)[:SEARCH_QUERY_LIMIT].strip()
+        if candidate and candidate == title:
+            return [(offset + start, offset + end)
+                    for start, end in _locate_title_spans(content, title)]
+        offset += len(raw_line)
+    return []
+
+
+def _visible_link_span(text: str, url: str) -> tuple[int, int] | None:
+    """Ürün linki metinde açıkça yazılıysa aralığını ver (satırdan silinir)."""
+    target = clean_url(url).rstrip("/").lower()
+    for match in URL_RE.finditer(text or ""):
+        raw = match.group(0).rstrip(_URL_TAIL_TRIM)
+        if raw and clean_url(raw).rstrip("/").lower() == target:
+            return match.start(), match.start() + len(raw)
+    return None
+
+
+def _hidden_link_span(obj: Any, text: str, url: str) -> tuple[int, int] | None:
+    """Ürün linki gizli hyperlink'se (görünen etiketi CTA ise) etiket aralığını ver.
+
+    Etiket anlamlı bir metinse ("Ürünü incele" yerine "Bebek bezi kampanyası"
+    gibi) dokunulmaz: kullanıcı isteği veri kaybı olmaması.
+    """
+    target = clean_url(url).rstrip("/").lower()
+    for entity in message_entities(obj):
+        entity_url = getattr(entity, "url", None)
+        if not entity_url or clean_url(entity_url).rstrip("/").lower() != target:
+            continue
+        offset = int(getattr(entity, "offset", 0) or 0)
+        length = int(getattr(entity, "length", 0) or 0)
+        if length <= 0:
+            continue
+        start = _utf16_to_index(text, offset)
+        end = _utf16_to_index(text, offset + length)
+        if end <= start:
+            continue
+        if _is_scaffold_residue(text[start:end]):
+            return start, end
+    return None
+
+
+def _spans_overlap(
+    span: tuple[int, int], others: Sequence[tuple[int, int]],
+) -> bool:
+    """Aralık verilen aralıklardan biriyle kesişiyor mu?"""
+    start, end = span
+    return any(start < other_end and other_start < end for other_start, other_end in others)
+
+
+# Fiyat satırının etiket kökleri: ``💰 Fiyat : 225 TL``, ``Fiyat: 225 TL``.
+_PRICE_LABEL_ROOTS = ("fiyat", "price")
+
+
+def _price_source_span(source: str, price: str) -> tuple[int, int] | None:
+    """``price`` metninin kaynakta kapladığı aralığı bul (URL/kupon satırını atla)."""
+    target = (price or "").strip()
+    if not target:
+        return None
+    fallback: tuple[int, int] | None = None
+    for match in _price_candidates(source):
+        span = (match.start(), match.end())
+        if match.group(0).strip() == target:
+            return span
+        if fallback is None:
+            fallback = span
+    return fallback
+
+
+def _price_row(source: str, price: str) -> tuple[str, tuple[int, int] | None]:
+    """Üst fiyat satırının metnini ve kaynaktan silinecek aralığı ver.
+
+    Fiyat, etiketli/emojili bir fiyat satırında bulunduysa satırın kalanı da
+    fiyata ait **veridir**: ``🏷️ 33 TL (3 Adet Alımda 22 TL)`` satırının tümü
+    üst satıra taşınır (``33 TL (3 Adet Alımda 22 TL)``) ve satır kaynaktan
+    silinir; kullanıcı isteği: "asıl fiyat 3 adet alımda 22 TL olması, bunu da
+    yukarıda görmeliyim". Etiketsiz bir satırda fiyat başta olsa bile devamı
+    fiyat içeriyorsa yine üste taşınır (``33 TL (22 TL)``). Başka veri içeriyorsa
+    yalnızca fiyat tüketilir, kalanı gövdede kalır: ``129,90 TL Stoklarla
+    sınırlı`` → ``Stoklarla sınırlı`` altta. Satırda URL varsa satır bütün olarak
+    silinmez; link verisi kaybolmaz.
+    """
+    text = (price or "").strip()
+    source = source or ""
+    span = _price_source_span(source, text)
+    if not span:
+        return text, None
+    start, end = span
+    line_start = source.rfind("\n", 0, start) + 1
+    line_end = source.find("\n", end)
+    if line_end < 0:
+        line_end = len(source)
+    content = source[line_start:line_end]
+    if URL_RE.search(content):
+        return text, span  # satırda link var: yalnızca fiyat silinir
+    before = content[: start - line_start]
+    rest = " ".join(content[end - line_start:].split()).strip()
+    labeled = bool(before.strip()) and all(
+        _word_matches(word, _PRICE_LABEL_ROOTS)
+        for word in WORD_TOKEN_RE.findall(before)
+    )
+    # Etiketsiz satır başındaki fiyatın devamı da fiyat içeriyorsa
+    # ("33 TL (3 Adet Alımda 22 TL)") o veri fiyata aittir; başka veri
+    # ("129,90 TL Stoklarla sınırlı") ise gövdede kalır.
+    if not labeled and not (not before.strip() and _SEARCH_PRICE_RE.search(rest)):
+        return text, span
+    row = f"{text} {rest}".strip() if rest else text
+    while row and row[-1] in ".,;:!?…":
+        row = row[:-1].rstrip()
+    return row or text, (line_start, line_end)
+
+
+# Fiyat bloğuna katılan "kart bilgisi" satırları: kaynak şablonlarda fiyat
+# satırının altında duran indirim/oran/kategori/mağaza bilgileri
+# (``💬 Ortalama fiyatın %31 altında``, ``📂 Süpermarket``, ``🛍️ Amazon``,
+# ``🗓️ 365 Günün En Düşük Fiyatı``). Kullanıcı isteği: "fiyat ve ona bağlı
+# şeyler blok olarak ikinci blokta"; ürün linki bu bloğun altına iner.
+_CARD_LINE_START_RE = re.compile(r"[^\w\s]")
+_PRICE_INFO_RE = re.compile(
+    r"%\s*\d|düşük|indirim|tasarruf|kazanç|ortalama", re.IGNORECASE,
+)
+
+
+def _price_card_lines(
+    source: str,
+    price_span: tuple[int, int] | None,
+    link_span: tuple[int, int] | None,
+    excluded: Sequence[tuple[int, int]] = (),
+) -> tuple[str, list[tuple[int, int]]]:
+    """Fiyat satırının altında duran fiyata bağlı satırları ver.
+
+    Fiyat satırından sonra, ürün linkine kadar duran fiyatla ilgili satırlar
+    fiyat bloğuna girer; ürün linki **bu bloğun altına** iner (kullanıcı
+    isteği: "sıra derken üçüncü blok dedim... bunlar fiyata bağlı bir blok,
+    dolayısıyla linkin üstünde olacak"). Fiyatla ilgili sayılma ölçütü: satır
+    emoji/işaretle başlıyor (``📂 Süpermarket``) ya da yüzde/indirim ifadesi
+    taşıyor (``%50 indirim``). Düz metin satırları (``Kaçırılmayacak fırsat!``)
+    gövdede kalır; veri kaybı olmaz. ``excluded`` aralıklarına (başlık satırı)
+    denk gelen satırlar alınmaz.
+    """
+    if not price_span:
+        return "", []
+    zone_start = source.find("\n", price_span[1])
+    if zone_start < 0:
+        return "", []  # fiyat son satırda: altında kart bilgisi yok
+    zone_start += 1
+    zone_end = len(source)
+    if link_span:
+        link_line = source.rfind("\n", 0, link_span[0]) + 1
+        if link_line <= zone_start:
+            return "", []  # link fiyat satırının üstünde/aynı satırda: sıra değişmez
+        zone_end = link_line
+    lifted: list[str] = []
+    spans: list[tuple[int, int]] = []
+    offset = zone_start
+    for raw_line in source[zone_start:zone_end].splitlines(keepends=True):
+        content = raw_line.rstrip("\r\n")
+        span = (offset, offset + len(content))
+        offset += len(raw_line)
+        stripped = content.strip()
+        if not stripped or URL_RE.search(content):
+            continue
+        if _spans_overlap(span, excluded):
+            continue
+        if not (_CARD_LINE_START_RE.match(stripped) or _PRICE_INFO_RE.search(stripped)):
+            continue
+        lifted.append(stripped)
+        spans.append(span)
+    return "\n".join(lifted), spans
+
+
+def _consume_offer_source(
+    obj: Any,
+    text: str,
+    *,
+    title: str,
+    price: str | None,
+    product_link: str | None,
+    price_span: tuple[int, int] | None = None,
+    extra_spans: Sequence[tuple[int, int]] = (),
+) -> tuple[str, list[tuple[str, str, list[tuple[int, int]]]]]:
+    """Başlık/fiyat/ürün linkini kaynak metinden çıkar.
+
+    Her öğe yalnızca alındığı yerden silinir; satırın geri kalanı anlamlıysa
+    korunur, yalnızca etiket artığıysa satır tümüyle düşer. ``price_span``
+    fiyatın üste alındığı aralıktır; etiketli bir fiyat satırıysa (``🏷️ 33 TL
+    (3 Adet Alımda 22 TL)``) satırın tamamı üste taşındığı için tümü silinir.
+    URL'lerin içine denk gelen fiyat/başlık parçaları silinmez (adres
+    bozulmasın). ``extra_spans`` fiyat bloğuna taşınan kart bilgisi
+    satırlarının aralıklarıdır; üstte gösterildikleri için gövdeden silinirler
+    (bkz. ``_price_card_lines``). Dönen adımlar ``(önce, sonra,
+    silinen_aralıklar)`` üçlüleridir; entity offset'leri bu adımlardan sırayla
+    geçirilir.
+    """
+    source = text or ""
+    url_spans = _merge_spans(
+        (match.start(), match.start() + len(match.group(0).rstrip(_URL_TAIL_TRIM)))
+        for match in URL_RE.finditer(source)
+    )
+    spans: list[tuple[int, int]] = []
+    if price_span is None:
+        price_span = _price_source_span(source, price or "")
+    if price_span and not _spans_overlap(price_span, url_spans):
+        spans.append(price_span)
+    if product_link:
+        link_span = _visible_link_span(source, product_link) \
+            or _hidden_link_span(obj, source, product_link)
+        if link_span:
+            spans.append(link_span)
+    spans.extend(
+        span for span in _title_spans(source, title)
+        if not _spans_overlap(span, url_spans)
+    )
+    # Fiyat bloğuna taşınan kart satırları (``💬``/``📂``/``🗓️`` ...) gövdeden düşer.
+    spans.extend(extra_spans)
+    spans = _merge_spans(spans)
+    if not spans:
+        return source, []
+
+    kept: list[str] = []
+    removed: list[tuple[int, int]] = []
+    offset = 0
+    for raw_line in source.splitlines(keepends=True):
+        content = raw_line.rstrip("\r\n")
+        ending = raw_line[len(content):]
+        line_end = offset + len(content)
+        local = _merge_spans(
+            (max(0, start - offset), min(len(content), end - offset))
+            for start, end in spans
+            if start < line_end and end > offset
+        )
+        if not local:
+            kept.append(raw_line)
+        else:
+            residue, local_removed = _squeeze_line(content, local)
+            if not residue:
+                # Satırda yalnızca etiket/ayraç artığı kaldı: satır tümüyle düşer.
+                removed.append((offset, offset + len(raw_line)))
+            else:
+                kept.append(residue + ending)
+                removed.extend((offset + start, offset + end)
+                               for start, end in local_removed)
+        offset += len(raw_line)
+
+    leftover = "".join(kept)
+    steps = [(source, leftover, _merge_spans(removed))]
+    # Tüketim sonrası artakalan fazla boş satırlar tek boş satıra iner; yalnızca
+    # boşluk/satır sonu silinir, metin içeriği ve entity'ler korunur.
+    blanks = _blank_line_spans(leftover)
+    if blanks:
+        compact = _remove_spans(leftover, blanks)
+        steps.append((leftover, compact, blanks))
+        leftover = compact
+    return leftover, steps
+
+
+def _remap_through_steps(
+    entities: Sequence[Any],
+    steps: Sequence[tuple[str, str, list[tuple[int, int]]]],
+) -> list[Any]:
+    """Entity offset'lerini silme adımlarından sırayla geçir."""
+    result = list(entities)
+    for before, after, spans in steps:
+        result = _remap_entities(before, after, result, spans)
+    return result
+
+
+def _entities_within(entities: Sequence[Any] | None, limit: int) -> list[Any]:
+    """UTF-16 sınırını aşan entity'leri at (Telegram taşan entity'yi reddeder)."""
+    kept: list[Any] = []
+    for entity in entities or []:
+        offset = int(getattr(entity, "offset", 0) or 0)
+        length = int(getattr(entity, "length", 0) or 0)
+        if length <= 0 or offset < 0 or offset + length > limit:
+            continue
+        kept.append(entity)
+    return kept
+
+
 def compose_message(
     obj: Any,
     *,
@@ -1770,33 +2268,80 @@ def compose_message(
     message_link_label: str = MESSAGE_LINK_LABEL,
     source_name: str | None = None,
 ) -> dict[str, Any]:
-    """Ürün özeti → kaynak mesajı → kaynak mesaj linki → kaynak adı düzenini kur.
+    """Sabit bildirim düzenini kur (kullanıcı isteği):
 
-    Ürün başlığı, fiyat ve mağaza linki varsa sabit üst blokta gösterilir; altına
-    kaynaktan temizlenmiş mesajın kendisi, taşınamayan gizli linkler, isteğe bağlı
-    ``Mesajı Gör`` ve en altta kaynak adı gelir. Ürün özeti yalnızca başlıkla
-    birlikte fiyat veya ürün linki bulunabildiğinde üretilir. Kaynak mesajının
-    metni ve entity'leri değiştirilmez; yalnızca yeni blokların offset'leri kadar
-    kaydırılır. Kaynak mesajı yer yetmezse kırpılır, özet ve linkler önce korunur.
+    1. ürün adı/başlık,
+    2. ``💰Fiyat: <fiyat>``; fiyat satırında ek veri varsa (``🏷️ 33 TL (3 Adet
+       Alımda 22 TL)``) hepsi bu satıra taşınır (bkz. ``_price_row``) ve
+       fiyata bağlı kart bilgileri (``💬 … %31 altında``, ``📂 Süpermarket``,
+       ``🗓️ 365 Günün En Düşük Fiyatı``) aynı bloğa girer
+       (bkz. ``_price_card_lines``),
+    3. ``🔗 <ürün linki>`` — **üçüncü blok**: fiyat bloğunun (fiyat + ona
+       bağlı satırlar) altına iner, satır olarak hemen altında olması gerekmez,
+    4. ``🔗 Mesajı Gör: <t.me linki>``,
+    5. bloklara giremeyen kaynak satırları ve taşınamayan gizli linkler,
+    6. en alt blok: kaynak grup adı — çoklu paylaşım notu bu bloğu kapatır
+       (``📌 N kere paylaşıldı: <gruplar>``; bkz. ``dedup_badge_insertion``).
 
-    ``body`` kaynak metnini, ``content`` özet + kaynak metnini; ``entities`` ise
-    tüm çıktı için doğru UTF-16 konumlarını taşır. Bot API için ``message`` aynı
-    content/entity çiftini verir; ek blokların bağlantıları düz URL olarak kalır.
+    Başlık, fiyat ve ürün linki kaynak mesajdan **alınır** ve alındıkları
+    satırlardan **silinir**; böylece aynı bilgi bildirimde iki kez görünmez
+    (kullanıcı isteği: "benim format için orijinalden veriyi al, aldıklarını da
+    aldığın yerden sil").
+
+    **İstisna:** kupon/duyuru paylaşımlarında ürün başlığı ve fiyat bulunmaz;
+    o mesajlar biçime sokulmaz, olduğu gibi iletilir (kullanıcı isteği).
+    Kaynak mesaj nesnesine hiçbir zaman dokunulmaz; yalnızca kopya yeniden
+    kurulur.
+
+    ``body`` alınmayan satırları, ``content`` başlık bloğu + gövdeyi;
+    ``entities`` ise tüm çıktı için doğru UTF-16 konumlarını taşır. Bot API
+    için ``message`` aynı content/entity çiftini verir; ek blokların
+    bağlantıları düz URL olarak kalır.
     """
     cleaned_obj = sanitize_message(obj)
     source_body = message_text(cleaned_obj)
     product_title = _search_query(cleaned_obj)
     price = extract_offer_price(cleaned_obj)
     product_link = extract_product_offer_link(cleaned_obj)
-    structured = bool(product_title and (price or product_link))
+    # Sabit düzen YALNIZCA ürün başlığı VE fiyat birlikte varsa kurulur.
+    # Kupon/duyuru paylaşımlarında ikisi de olmaz; onlar olduğu gibi iletilir
+    # (kullanıcı isteği: "istisnai durumlarda bildirimleri olduğu gibi atsın").
+    structured = bool(product_title and price)
 
     summary = ""
+    body = source_body
+    body_entities = entities_for_text(cleaned_obj, source_body)
     if structured:
-        summary = "\n\n".join((
+        # Fiyat bloğu (2. sıra): fiyatın kendisi VE fiyat satırında yazılı ek
+        # veri (``🏷️ 33 TL (3 Adet Alımda 22 TL)`` → hepsi üstte görünür).
+        price_text, price_span = _price_row(source_body, price or "")
+        # Fiyata bağlı kart bilgileri (``💬 … %31 altında``, ``📂 Süpermarket``,
+        # ``🗓️ 365 Günün En Düşük Fiyatı``) fiyat bloğuna girer; ürün linki
+        # (3. blok) bu bloğun altına iner (kullanıcı isteği: "bunlar fiyata
+        # bağlı bir blok, dolayısıyla linkin üstünde olacak").
+        link_span = None
+        if product_link:
+            link_span = _visible_link_span(source_body, product_link) \
+                or _hidden_link_span(cleaned_obj, source_body, product_link)
+        card_text, card_spans = _price_card_lines(
+            source_body, price_span, link_span,
+            excluded=_title_spans(source_body, product_title),
+        )
+        header = [
             product_title,
-            f"{PRICE_LINE_LABEL} {price or 'Belirtilmemiş'}",
-            f"{PRODUCT_LINK_LABEL} {product_link or 'Kaynak mesajda bulunamadı'}",
-        ))
+            f"{MONEY_EMOJI}{PRICE_LINE_LABEL} {price_text}",
+        ]
+        if card_text:
+            header.append(card_text)
+        if product_link:
+            header.append(f"{PRODUCT_LINK_PREFIX} {product_link}")
+        summary = "\n\n".join(header)
+        body, steps = _consume_offer_source(
+            cleaned_obj, source_body,
+            title=product_title, price=price, product_link=product_link,
+            price_span=price_span, extra_spans=card_spans,
+        )
+        body_entities = _remap_through_steps(body_entities, steps)
 
     excluded_urls = (product_link,) if structured and product_link else ()
     appendix_text = build_link_appendix(
@@ -1821,60 +2366,95 @@ def compose_message(
     name = (source_name or "").strip() or None
     sep = "\n\n"
 
-    appendix_block = f"{sep}{appendix_text}" if appendix_text else ""
-    source_block = f"{sep}{source_line}" if source_line else ""
-    name_block = f"{sep}{name}" if name else ""
-    summary_body_sep = sep if summary and source_body else ""
-    fixed_header_length = len(summary) + len(summary_body_sep)
+    # Blok sırası (kullanıcı isteği): başlık → fiyat (+ fiyatla ilgili tüm
+    # bilgiler) → ürün linki → "Mesajı Gör" → bloklara giremeyen satırlar ve
+    # gizli linkler → en alt blok: kaynak grup(lar). Çoklu paylaşım notu bu son
+    # bloğu kapatır (bkz. ``dedup_badge_insertion``).
+    if structured:
+        segments: list[tuple[str, str]] = [
+            ("header", summary),
+            ("source", source_line),
+            ("body", body),
+            ("appendix", appendix_text),
+            ("name", name or ""),
+        ]
+    else:
+        # Kupon/duyuru istisnası: özgün metin başta kalır, olduğu gibi iletilir.
+        segments = [
+            ("body", body),
+            ("appendix", appendix_text),
+            ("source", source_line),
+            ("name", name or ""),
+        ]
 
-    # Yer yetmezse ürün özeti korunur; ek linkler → kaynak adı → mesaj linki
-    # sırasıyla düşer. Böylece başlık/fiyat/link mesajın en başında kalır.
-    if fixed_header_length + len(appendix_block) + len(source_block) + len(name_block) >= limit:
-        appendix_block, appendix_text = "", ""
-    if fixed_header_length + len(source_block) + len(name_block) >= limit:
-        name_block, name = "", None
-    if fixed_header_length + len(source_block) >= limit:
-        source_block, source_line = "", ""
-    if fixed_header_length >= limit:
-        # Aşırı uzun bir başlık/link ve çok küçük test/özel limitinde geçersiz
-        # yarım URL üretme; özgün gövde ve normal ekler için yer aç.
+    def _join(parts: Sequence[tuple[str, str]]) -> str:
+        return sep.join(value for _, value in parts if value)
+
+    def _other_than_body() -> str:
+        return _join([part for part in segments if part[0] != "body" and part[1]])
+
+    # GÖVDE hariç parçalar sığmıyorsa sırasıyla ek link listesi, en alt blok ve
+    # "Mesajı Gör" düşer; başlık + fiyat bloğu en sona kadar korunur. (Gövde
+    # uzun olduğu için bu parçaların düşmesi yanlış olurdu; gövde kırpılır.)
+    if len(_other_than_body()) >= limit and appendix_text:
+        segments = [(kind, "" if kind == "appendix" else value) for kind, value in segments]
+        appendix_text = ""
+    if len(_other_than_body()) >= limit and name:
+        segments = [(kind, "" if kind == "name" else value) for kind, value in segments]
+        name = None
+    if len(_other_than_body()) >= limit and source_line:
+        segments = [(kind, "" if kind == "source" else value) for kind, value in segments]
+        source_line = ""
+    if structured and len(_other_than_body()) >= limit:
+        # Aşırı uzun başlık bloğu sığmıyor: sabit düzen kurulmaz. Kaynaktan
+        # alınan satırlar geri verilir; veri kaybolmaz.
         summary = ""
-        summary_body_sep = ""
-        fixed_header_length = 0
         product_title = ""
         price = None
         product_link = None
+        body = source_body
+        body_entities = entities_for_text(cleaned_obj, source_body)
+        segments = [("body", body), ("source", source_line), ("name", name or "")]
 
-    suffix_length = len(appendix_block) + len(source_block) + len(name_block)
-    body_room = max(0, limit - fixed_header_length - suffix_length)
-    body = source_body
-    if len(body) > body_room:
-        body = body[: max(0, body_room - 1)].rstrip() + "…" if body_room else ""
+    # Gövde için kalan yer: diğer parçalar (varsa) korunur, gövde kırpılır.
+    others_text = _other_than_body()
+    current_body = next((value for kind, value in segments if kind == "body"), "")
+    gap = len(sep) if (current_body and others_text) else 0
+    body_room = max(0, limit - len(others_text) - gap)
+    if len(current_body) > body_room:
+        current_body = current_body[: max(0, body_room - 1)].rstrip() + "…" if body_room else ""
+    body = current_body
+    segments = [(kind, body if kind == "body" else value) for kind, value in segments]
 
-    if summary and body:
-        content = summary + sep + body
-        body_offset = utf16_length(summary + sep)
-    elif summary:
-        content = summary
-        body_offset = 0
-    else:
-        content = body
-        body_offset = 0
+    offsets: dict[str, int] = {}
+    parts: list[str] = []
+    cursor = 0
+    for kind, value in segments:
+        if not value:
+            continue
+        if parts:
+            parts.append(sep)
+            cursor += utf16_length(sep)
+        offsets.setdefault(kind, cursor)
+        parts.append(value)
+        cursor += utf16_length(value)
+    text = "".join(parts)
+    # `content` en alt blok (kaynak adı) hariç her şeydir; ad en sonda olduğu
+    # için Bot API entity konumları bozulmaz.
+    content = _join([(kind, value) for kind, value in segments if kind != "name"])
+    name_offset = offsets["name"] if "name" in offsets else -1
+    body_offset = offsets.get("body", 0)
 
     content_entities: list[Any] = []
     if summary and product_title:
         content_entities.append(types.MessageEntityBold(
             offset=0, length=utf16_length(product_title),
         ))
-    content_entities.extend(shift_telethon_entities(
-        entities_for_text(cleaned_obj, body), body_offset,
+    content_entities.extend(_entities_within(
+        shift_telethon_entities(body_entities, body_offset),
+        body_offset + utf16_length(body),
     ))
-
-    text = content + appendix_block + source_block
-    name_offset = -1
-    if name_block and name:
-        name_offset = utf16_length(text + sep)
-        text += name_block
+    if name_offset >= 0 and name:
         content_entities.append(types.MessageEntityBold(
             offset=name_offset, length=utf16_length(name),
         ))
@@ -1893,7 +2473,7 @@ def compose_message(
         "source_url": message_link if source_line else None,
         "source_name": name,
         "source_name_offset": name_offset,
-        "source_name_length": utf16_length(name) if (name_block and name) else 0,
+        "source_name_length": utf16_length(name) if (name_offset >= 0 and name) else 0,
         "product_title": product_title or None,
         "price": price,
         "product_link": product_link,
@@ -1977,6 +2557,19 @@ def bot_api_entities(obj: Any, body: str) -> list[dict[str, Any]]:
         if data:
             result.append(data)
     return result
+
+
+def composed_has_content(composed: dict[str, Any]) -> bool:
+    """İletilecek gerçek içerik var mı?
+
+    ``content`` artık "Mesajı Gör" satırını da taşır; yalnızca o satırın
+    bulunması metin sayılmaz. Kaynakta metin yoksa iletim zincirinin son çaresi
+    (t.me bağlantı kartı) devreye girebilsin diye bu ayrım gerekir.
+    """
+    return any(
+        str(composed.get(key) or "").strip()
+        for key in ("summary", "body", "appendix")
+    )
 
 
 def source_name_entity(composed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2091,11 +2684,12 @@ def bot_media_descriptor(obj: Any) -> dict[str, Any] | None:
 #     sözlüğüne yazılır (mesaj başına EK API çağrısı YOKTUR;
 #     her tekrarda geçmiş taramak hem bildirimi geciktirir hem FloodWait/429
 #     riskini artırırdı).
-#   * Sonraki aynı ürün sorgusuna sahip kopyalar gruba ATILMAZ; ilk mesaja
-#     fiyat satırının altına rozet işlenir: "✅ 2 kaynakta paylaşıldı · teyitli fırsat"...
-#   * Rozet TEK SATIRDIR: kaynak adları tek tek yazılmaz (kullanıcı isteği:
-#     5 kaynak alt alta yazılınca bildirim karışıyordu); sayı ve "teyitli
-#     fırsat" etiketi yeter. Kalın + emoji + (sayı büyüdükçe) büyük harf,
+#   * Sonraki aynı ürün sorgusuna sahip kopyalar gruba ATILMAZ; ilk mesajın
+#     EN ALT bloğuna, kaynak grup ad(lar)ının altına çoklu paylaşım notu
+#     işlenir ve bildirim orada kapanır:
+#     "📌 2 kere paylaşıldı: FırsatZ, İndirimde Al" (kullanıcı isteği).
+#   * Not TEK SATIRDIR; grup adları virgülle yazılır. Sayı 5'i geçince vurgu
+#     artar: "🚨 5 kere paylaşıldı: ... — KAÇIRMA!". Kalın + emoji,
 #     Telegram'ın sunduğu en güçlü vurgu kombinasyonudur.
 #   * Eşleşme penceresi ``dedup_window_hours`` ile sınırlıdır (varsayılan 12):
 #     iki hafta sonra aynı ürün yine indirime girerse YENİ fırsat sayılır.
@@ -2107,14 +2701,21 @@ def bot_media_descriptor(obj: Any) -> dict[str, Any] | None:
 # diğerleri onun bitmesini bekleyip tekrara düşer (bkz. main() içindeki
 # dedup_before_send / dedup_after_send).
 
-# Rozet satırı: "✅ 2 kaynakta paylaşıldı · teyitli fırsat" / "🔥🔥 4 kaynakta ..." /
-# "🚨 5 KAYNAKTA PAYLAŞILDI — KAÇIRMA! 🚨" (büyük/küçük harf farkını yok say).
-DEDUP_BADGE_RE = re.compile(r"^(✅|🔥+|🚨)\s*(\d+)\s+kaynakta\s+paylaşıldı", re.IGNORECASE)
-# Eski sürüm rozeti ikinci satırda kaynak adlarını listelerdi ("📌 Kaynaklar: ...").
-# Yeni rozet tek satır; bu önek yalnızca ESKİ mesajların rozeti sökülürken
-# (açılış taraması) o satırı atlamak için korunur — geriye dönük uyumluluk.
+# Çoklu paylaşım notu (kullanıcı isteği): bildirimi KAPATAN son bloktur,
+# "📌 2 kere paylaşıldı: FırsatZ, İndirimde Al" biçiminde yazılır; 5+ kaynakta
+# baştaki emoji 🚨 olur ve sonuna "— KAÇIRMA!" eklenir.
+# (Emoji grubu yakalanmaz; sayı her iki biçimde de 1. gruptur.)
+DEDUP_BADGE_RE = re.compile(r"^(?:📌|🚨)\s*(\d+)\s+kere\s+paylaşıldı", re.IGNORECASE)
+# Eski rozet biçimi: "✅ 2 kaynakta paylaşıldı · teyitli fırsat" / "🔥🔥 4 kaynakta ..."
+# (üst satırda ya da fiyat satırının hemen altında dururdu). Yalnızca ESKİ
+# gönderilmiş bildirimlerin rozeti sökülürken tanınır — geriye dönük uyumluluk.
+DEDUP_BADGE_LEGACY_RE = re.compile(
+    r"^(?:✅|🔥+|🚨)\s*(\d+)\s+kaynakta\s+paylaşıldı", re.IGNORECASE,
+)
+# Çok daha eski sürüm rozeti ikinci satırda kaynak adlarını listelerdi
+# ("📌 Kaynaklar: ..."); açılış taramasında o satırı atlamak için korunur.
 DEDUP_SOURCES_PREFIX = "📌"
-# Aynı sohbete Bot API ~1/sn sınırı uygular; rozet güncellemeleri
+# Aynı sohbete Bot API ~1/sn sınırı uygular; not güncellemeleri
 # bunun altında kalmak için mesaj başına bu kadar aralık bırakır.
 DEDUP_EDIT_MIN_INTERVAL = 1.2
 # Rezervasyon koyup bitirmeyen göndereni bekleme süresi (sonrası devralma).
@@ -2139,34 +2740,72 @@ def dedup_key(title: str | None) -> str | None:
     return key or None
 
 
-def dedup_badge(count: int, *, short: bool = False) -> str:
-    """Tekrar rozetinin metni; ilk gönderimde (``count < 2``) boş döner.
+def dedup_badge(
+    count: int, *, sources: Sequence[str] | None = None, short: bool = False,
+) -> str:
+    """Çoklu paylaşım notunun metni; ilk gönderimde (``count < 2``) boş döner.
 
-    Tek satır: sayı + "teyitli fırsat" etiketi. Kaynak adları tek tek
-    yazılmaz (kullanıcı isteği: 5 kaynak alt alta yazılınca mesaj karışıyor).
-    Sayı büyüdükçe vurgu artar: ✅ → 🔥 → 🔥🔥 → 🚨 + BÜYÜK HARF.
-    ``short=True`` dar açıklamalar (medya altı) için kısaltılmış başlığı verir.
+    Kullanıcı isteği: "2-3-4 kere paylaşıldı şu şu şu gruplarda" — not, en alt
+    blokta kaynak grupların altına eklenip mesajı kapatır. 5 ve üzeri sayıda
+    vurgu artar (🚨 ... — KAÇIRMA!). ``short=True`` (dar medya açıklaması)
+    grup adlarını yazmaz; yer yetmezse uzun biçim işe yaramaz.
     """
     if count < 2:
         return ""
-    if count == 2:
-        return "✅ 2 kaynakta paylaşıldı · teyitli fırsat"
-    if count == 3:
-        return "🔥 3 kaynakta paylaşıldı! · teyitli fırsat"
-    if count == 4:
-        return "🔥🔥 4 kaynakta paylaşıldı!! · teyitli fırsat"
+    names = ", ".join(
+        dict.fromkeys(str(name).strip() for name in (sources or []) if str(name).strip())
+    )
     if short:
-        return f"🚨 {count} kaynakta paylaşıldı!"
-    return f"🚨 {count} KAYNAKTA PAYLAŞILDI — KAÇIRMA! 🚨"
+        names = ""
+    head = "📌" if count < 5 else "🚨"
+    line = f"{head} {count} kere paylaşıldı"
+    if names:
+        line += f": {names}"
+    if count >= 5:
+        line += " — KAÇIRMA!"
+    return line
+
+
+def _dedup_badge_match(content: str) -> re.Match[str] | None:
+    """Satır çoklu paylaşım notu mu? (yeni biçim ya da eski rozet)"""
+    stripped = (content or "").strip()
+    return DEDUP_BADGE_RE.match(stripped) or DEDUP_BADGE_LEGACY_RE.match(stripped)
+
+
+def dedup_badge_sources(content: str | None) -> list[str]:
+    """Rozet satırındaki grup adlarını ayıkla (güncelleme ve açılış taraması)."""
+    line = (content or "").strip()
+    if not DEDUP_BADGE_RE.match(line):
+        return []
+    _, _, names = line.partition(":")
+    names = names.replace("— KAÇIRMA!", " ")
+    return [name.strip() for name in names.split(",") if name.strip()]
 
 
 def _dedup_badge_location(text: str) -> tuple[int, int, int] | None:
-    """Rozeti yalnızca eski üst satırda veya yeni fiyat bloğundan sonra tanı."""
-    offset = 0
+    """Rozetin konumunu bul: not artık mesajı kapatan son satırdır.
+
+    Öncelik yeni biçimdedir (en son anlamlı satır). Eski gönderilmiş
+    bildirimlerin rozeti ya en üstte ya fiyat satırının altındaydı; o konumlar
+    yalnızca geriye dönük olarak taranır ki geçmiş mesajlar da düzeltilebilsin.
+    """
     lines = text.splitlines(keepends=True)
+    offset = len(text)
+    for line in reversed(lines):
+        content = line.rstrip("\r\n")
+        offset -= len(line)
+        if not content.strip():
+            continue
+        match = _dedup_badge_match(content)
+        if not match:
+            break  # son anlamlı satır rozet değil → yeni biçim yok
+        count = _dedup_badge_count(match)
+        return count, offset, offset + len(content)
+
+    offset = 0
     for index, line in enumerate(lines[:8]):
         content = line.rstrip("\r\n")
-        match = DEDUP_BADGE_RE.match(content.strip())
+        match = _dedup_badge_match(content)
         if not match:
             offset += len(line)
             continue
@@ -2174,19 +2813,21 @@ def _dedup_badge_location(text: str) -> tuple[int, int, int] | None:
             (prior.strip() for prior in reversed(lines[:index]) if prior.strip()),
             "",
         )
-        has_price_before = any(
-            prior.strip().startswith(PRICE_LINE_LABEL) for prior in lines[:index]
-        )
-        if index != 0 and not previous_nonempty.startswith(PRICE_LINE_LABEL) \
+        has_price_before = any(is_price_line(prior) for prior in lines[:index])
+        if index != 0 and not is_price_line(previous_nonempty) \
                 and (has_price_before or index > 2):
             offset += len(line)
             continue
-        try:
-            count = max(1, int(match.group(2)))
-        except ValueError:
-            count = 1
-        return count, offset, offset + len(content)
+        return _dedup_badge_count(match), offset, offset + len(content)
     return None
+
+
+def _dedup_badge_count(match: re.Match[str]) -> int:
+    """Eşleşmeden paylaşım sayısını çıkar; okunamazsa 1 say."""
+    try:
+        return max(1, int(match.group(1)))
+    except (ValueError, IndexError):
+        return 1
 
 
 def _strip_dedup_badge_details(
@@ -2223,7 +2864,7 @@ def _strip_dedup_badge_details(
 
 
 def strip_dedup_badge(text: str | None) -> tuple[int, str]:
-    """Metnin başındaki eski veya fiyat-altındaki yeni rozeti güvenle söker."""
+    """Çoklu paylaşım notunu (ya da eski rozeti) metinden güvenle söker."""
     count, base, _ = _strip_dedup_badge_details(text)
     return count, base
 
@@ -2272,29 +2913,21 @@ def dedup_current_prefix(text: str | None) -> str:
 
 
 def dedup_badge_insertion(text: str, badge: str) -> tuple[str, int, int, int]:
-    """Rozeti fiyatın altına, fiyat yoksa ilk anlamlı satırın altına ekle."""
+    """Notu en alt bloğa ekle: kaynak grup adının altına, mesajı kapatacak şekilde.
+
+    Kullanıcı isteği: "çoklu paylaşım yakalandığında da bunu en alta ekleyelim
+    ... son bloğa koyup kapatalım". Eski biçim notu fiyat satırının altına
+    koyuyordu; artık her zaman en son satırdır.
+    """
     if not badge:
         return text, 0, 0, 0
-    offset = 0
-    insert_at: int | None = None
-    first_line_end: int | None = None
-    for line in text.splitlines(keepends=True):
-        content = line.rstrip("\r\n")
-        if content.strip():
-            if first_line_end is None:
-                first_line_end = offset + len(content)
-            if content.strip().startswith(PRICE_LINE_LABEL):
-                insert_at = offset + len(content)
-                break
-        offset += len(line)
-    if insert_at is None:
-        insert_at = first_line_end if first_line_end is not None else 0
-    insertion = f"\n\n{badge}" if insert_at else f"{badge}\n\n"
-    new_text = text[:insert_at] + insertion + text[insert_at:]
-    start_units = utf16_length(text[:insert_at])
-    insertion_units = utf16_length(insertion)
-    badge_offset = start_units + (utf16_length("\n\n") if insert_at else 0)
-    return new_text, start_units, insertion_units, badge_offset
+    body = text.rstrip(" \t\r\n")
+    prefix = "\n" if body else ""
+    new_text = f"{body}{prefix}{badge}"
+    insert_at = len(body)
+    insert_length = len(prefix) + len(badge)
+    badge_offset = utf16_length(body + prefix)
+    return new_text, insert_at, insert_length, badge_offset
 
 
 def _rebase_entities_for_dedup_badge(
@@ -2305,7 +2938,7 @@ def _rebase_entities_for_dedup_badge(
     *,
     bot_api: bool = False,
 ) -> list[Any]:
-    """Entity offset'lerini rozetin kaldırılıp fiyat altına eklenmesine göre taşı."""
+    """Entity offset'lerini notun kaldırılıp sona eklenmesine göre taşı."""
     old_start, old_end, replacement_length = removed
     removed_length = max(0, old_end - old_start)
     after_delta = replacement_length - removed_length
@@ -2383,11 +3016,29 @@ def dedup_rebased_tl_entities(
     return shift_telethon_entities(kept, new_prefix_len - old_prefix_len)
 
 
-def new_dedup_entry(title: str, token: Any) -> dict[str, Any]:
-    """Gönderim rezervasyonu konmuş yeni önbellek kaydı (``pending=True``)."""
+def note_dedup_source(entry: dict[str, Any], source_name: str | None) -> None:
+    """Tekrarı paylaşan grubun adını kayda ekle (son bloktaki nota yazılır)."""
+    name = (source_name or "").strip()
+    if not name:
+        return
+    names = entry.setdefault("sources", [])
+    if not isinstance(names, list):
+        names = entry["sources"] = []
+    if name not in names:
+        names.append(name)
+
+
+def new_dedup_entry(title: str, token: Any, source_name: str | None = None) -> dict[str, Any]:
+    """Gönderim rezervasyonu konmuş yeni önbellek kaydı (``pending=True``).
+
+    ``sources`` ilk kopyayı paylaşan grupları tutar; çoklu paylaşım notu
+    ("📌 N kere paylaşıldı: <gruplar>") bu adlarla kurulur (bkz. ``dedup_badge``).
+    """
     now = time.time()
+    name = (source_name or "").strip()
     return {
         "title": title,
+        "sources": [name] if name else [],
         "count": 1,
         "first_seen": now,
         "last_seen": now,
@@ -2399,7 +3050,7 @@ def new_dedup_entry(title: str, token: Any) -> dict[str, Any]:
         "bot_message_id": None,
         "account_message_id": None,
         "kind": "text",      # "text" | "media" (bot düzenlemesinin yöntemini seçer)
-        "text": "",          # ilk mesajın güncel tam metni (rozette güncel tutulur)
+        "text": "",          # ilk mesajın güncel tam metni (not işlenirken güncellenir)
         "entities_bot": None,  # Bot API entity sözlükleri (güncel metne göre)
         "entities_tl": None,   # Telethon entity'leri (güncel metne göre)
         "keyboard": None,
@@ -3899,10 +4550,15 @@ async def main(argv: Sequence[str] | None = None) -> int:
     if MESSAGE_LINK_LINE:
         log.info("Her iletinin sonuna '🔗 %s: <t.me mesaj linki>' satırı eklenecek.", MESSAGE_LINK_LABEL)
     if NOTIFY_BOT_TOKEN:
-        log.info("Bildirim biçimi: ürün başlığı/fiyat/ürün linki → kaynak mesajı "
-                 "+ '🔗 %s: <t.me linki>'%s%s",
-                 MESSAGE_LINK_LABEL, " + medya" if NOTIFY_MEDIA else "",
-                 " + en altta kalın kaynak adı" if SOURCE_FOOTER else "")
+        log.info("Bildirim biçimi (sabit düzen): başlık → '%s%s <fiyat>' (fiyat satırındaki tüm "
+                 "veri + fiyata bağlı satırlar) → '%s <ürün linki>' (fiyat bloğunun altına "
+                 "inen 3. blok) → '🔗 %s: <t.me linki>' → kaynakta alınmayan satırlar + gizli "
+                 "linkler → en altta kalın kaynak adı%s (çoklu paylaşım notu bu son bloğu "
+                 "kapatır). Alınan başlık/fiyat/link satırları gövdeden silinir, veri kaybı "
+                 "olmaz; kupon/duyuru paylaşımları başlık/fiyat bulunmadığı için olduğu gibi "
+                 "iletilir.",
+                 MONEY_EMOJI, PRICE_LINE_LABEL, PRODUCT_LINK_PREFIX, MESSAGE_LINK_LABEL,
+                 " + medya" if NOTIFY_MEDIA else "")
     if CLEAN_COMMANDS:
         log.info("Komut temizliği açık: yeni komutta önceki komut/yanıt silinir, "
                  "bildirimlere dokunulmaz.")
@@ -4527,10 +5183,13 @@ async def main(argv: Sequence[str] | None = None) -> int:
                 layout_ok = bool(dry_run["text"] or media or links)
                 if dry_run["summary"]:
                     parts = dry_run["content"].split("\n\n")
+                    # Fiyat bloğu çok satırlı olabilir (fiyat + fiyatla ilgili
+                    # bilgiler); ilk satırı fiyat satırıdır.
+                    price_block_first = parts[1].split("\n", 1)[0] if len(parts) > 1 else ""
                     layout_ok = (
-                        layout_ok and len(parts) >= 3
+                        layout_ok and len(parts) >= 2
                         and parts[0] == product_title
-                        and parts[1].startswith(PRICE_LINE_LABEL)
+                        and is_price_line(price_block_first)
                     )
                 can_use = (
                     raw_integrity_ok and valid_entities == len(entities) and layout_ok
@@ -4827,7 +5486,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
             event, limit=MESSAGE_LIMIT - 400, link_kinds=LINK_KINDS,
             message_link=offer_link(event), source_name=footer_name,
         )
-        if not composed["content"].strip() and not composed["appendix"]:
+        if not composed_has_content(composed):
             raise ValueError("mesajda metin yok")
         has_media = bool(getattr(event.message, "media", None))
         note = "\n\n⚠️ Kaynak medyayı korumalı işaretlediği için medya iletilemedi." if has_media else ""
@@ -4849,7 +5508,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
             event, limit=2000, link_kinds=LINK_KINDS,
             message_link=link, source_name=footer_name,
         )
-        if composed["content"].strip():
+        if composed_has_content(composed):
             body = composed["text"]
         else:
             body = f"🔗 {STATS['last_match_source'] or 'kaynak'} kanalındaki mesaj:\n{link}"
@@ -4871,11 +5530,14 @@ async def main(argv: Sequence[str] | None = None) -> int:
     # diğerleri bekleyip tekrara düşer. Rozet güncellemesi arka planda yapılır,
     # yeni fırsatların bildirimini ASLA bekletmez.
 
-    async def dedup_before_send(key: str, title: str) -> tuple[str, Any]:
+    async def dedup_before_send(
+        key: str, title: str, source_name: str | None = None,
+    ) -> tuple[str, Any]:
         """Karar ver: ``("send", token)`` yeni gönderim, ``("dup", None)`` tekrar.
 
         Rezervasyon sahibi takılırsa bekleyen devralır; fırsatın kaybolmasındansa
-        fazladan bir mesaj iyidir (fail-open).
+        fazladan bir mesaj iyidir (fail-open). ``source_name``, tekrarlarda son
+        bloğa yazılacak grup adı listesine eklenir.
         """
         token: Any = object()
         steals = 0
@@ -4884,11 +5546,12 @@ async def main(argv: Sequence[str] | None = None) -> int:
                 prune_dedup_cache(DEDUP_CACHE, time.time(), DEDUP_WINDOW_SECONDS, DEDUP_MAX_ENTRIES)
                 entry = DEDUP_CACHE.get(key)
                 if entry is None or entry.get("failed"):
-                    DEDUP_CACHE[key] = new_dedup_entry(title, token)
+                    DEDUP_CACHE[key] = new_dedup_entry(title, token, source_name)
                     return "send", token
                 if not entry.get("pending"):
                     entry["count"] += 1
                     entry["last_seen"] = time.time()
+                    note_dedup_source(entry, source_name)
                     asyncio.create_task(dedup_apply_badge(key))
                     return "dup", None
                 waiter_event = entry["ready"]
@@ -4904,7 +5567,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
                         current["failed"] = True
                         current["ready"].set()
                         token = object()
-                        DEDUP_CACHE[key] = new_dedup_entry(title, token)
+                        DEDUP_CACHE[key] = new_dedup_entry(title, token, source_name)
                         return "send", token
                 if steals >= 3:
                     log.warning("Tekrar kilidi çözülemedi, açık gönderiliyor (başlık: %.40s).", title)
@@ -4979,13 +5642,20 @@ async def main(argv: Sequence[str] | None = None) -> int:
                 return
             if wait > 0:
                 await asyncio.sleep(wait)
-            # Eski rozet (varsa) çıkarılır, yenisi Fiyat satırından sonra eklenir.
+            # Eski not (varsa) çıkarılır, yenisi en alt bloğa eklenip mesajı kapatır.
             _, base, removed_badge = _strip_dedup_badge_details(current_text)
             if not base.strip():
                 log.warning("Rozet gövdesi boş, güncelleme atlandı (başlık: %.40s).",
                             entry.get("title", ""))
                 return
-            badges = [dedup_badge(count), dedup_badge(count, short=True)]
+            names = list(entry.get("sources") or [])
+            if not names:
+                # Önbellek açılış taramasıyla kurulduysa adlar eski nottan okunur.
+                names = dedup_badge_sources(current_text.splitlines()[-1] if current_text else "")
+            badges = [
+                dedup_badge(count, sources=names),
+                dedup_badge(count, sources=names, short=True),
+            ]
             tried: set[str] = set()
             for badge in badges:
                 if not badge or badge in tried:
@@ -5120,7 +5790,9 @@ async def main(argv: Sequence[str] | None = None) -> int:
                 looks_like_deal = (
                     badge_count > 1
                     or MESSAGE_LINK_LABEL in text
-                    or PRODUCT_LINK_LABEL in text
+                    or PRODUCT_LINK_LABEL in text  # eski biçim
+                    or any(is_price_line(line)      # yeni biçim (💰Fiyat: ya da 💰 Fiyat:)
+                           for line in text.splitlines())
                 )
                 if sender == SELF_ID:
                     editable: str | None = "account"
@@ -5156,6 +5828,10 @@ async def main(argv: Sequence[str] | None = None) -> int:
                         record["failed"] = False
                         record["ready"].set()
                         record["count"] = max(1, badge_count)
+                        if badge_count > 1:
+                            names = dedup_badge_sources(text.splitlines()[-1] if text else "")
+                            if names:
+                                record["sources"] = names
                         record["first_seen"] = seen_at
                         record["last_seen"] = seen_at
                         record["editable"] = editable
@@ -5189,9 +5865,13 @@ async def main(argv: Sequence[str] | None = None) -> int:
     ) -> tuple[bool, dict[str, Any]]:
         """Bildirim botuyla fırsatın kopyasını at; (gönderildi_mi, bilgi) döner.
 
-        Tasarım: mesajın kendisi (biçimi ve gizli linkleriyle) → altına
-        "🔗 <gizli linkler>" (varsa) → "🔗 Mesajı Gör: <t.me linki>" → en alta
-        kaynak grup adı. Ad, "Fırsatı Gönderen" gibi bir etiket olmadan ve
+        Tasarım (sabit düzen): başlık → "💰Fiyat: <fiyat>" ve fiyatla ilgili
+        tüm bilgiler → "🔗 <ürün linki>" → "🔗 Mesajı Gör: <t.me linki>" →
+        bloklara giremeyen satırlar/gizli linkler → en alt blokta kaynak grup
+        adı (çoklu paylaşım notu bu bloğu kapatır). Başlık, fiyat (ek fiyat
+        bilgileriyle) ve ürün linki kaynak mesajdan alınıp alındıkları
+        satırlardan silinir; bu yüzden aynı bilgi iki kez görünmez, alınmayan
+        satırlar korunur. Ad, "Fırsatı Gönderen" gibi bir etiket olmadan ve
         hiçbir linke bağlanmadan yalnızca kalın yazılır.
 
         Dönen ilk değer, tek mesaj modunda hesap kopyasının silinip
@@ -5487,7 +6167,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
         if not dedup_id:
             await deliver(event, source_name)
             return
-        decision, token = await dedup_before_send(dedup_id, dedup_title)
+        decision, token = await dedup_before_send(dedup_id, dedup_title, source_name)
         if decision == "dup":
             STATS["deduped"] += 1
             log.info("Tekrar birleştirildi (kaynak=%s): %.60s", source_name, dedup_title)

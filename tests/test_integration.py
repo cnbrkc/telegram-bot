@@ -1175,7 +1175,7 @@ class NotificationTest(unittest.TestCase):
     # --- yeni biçim ---------------------------------------------------------
 
     def test_notification_is_the_message_itself_plus_message_link(self):
-        """Kırpılmış/küçültülmüş özet değil, mesajın kendisi + Mesajı Gör + kaynak adı."""
+        """Yeni sıra: başlık → 💰 fiyat → Mesajı Gör → kalan satırlar → en altta kaynak adı."""
         client = self._run({"notify_bot_token": "123:ABC"})
         text = "Sıcak ÇAY 5 TL\nKaçırılmayacak fırsat!"
         self._send(client, text)
@@ -1183,12 +1183,90 @@ class NotificationTest(unittest.TestCase):
         call = self.media_calls[0]
         self.assertEqual(call["token"], "123:ABC")
         self.assertEqual(call["chat_id"], GROUP_ID)
-        self.assertIn(text, call["caption"], "mesajın tamamı gitmeli")
-        self.assertIn("🔗 Mesajı Gör: https://t.me/firsatz/1", call["caption"])
+        blocks = call["caption"].split("\n\n")
+        self.assertEqual(blocks[:3], [
+            "Sıcak ÇAY", "💰Fiyat: 5 TL", "🔗 Mesajı Gör: https://t.me/firsatz/1",
+        ])
+        self.assertEqual(blocks[-2], "Kaçırılmayacak fırsat!",
+                         "bloklara giremeyen satır Mesajı Gör'ün altında kalır")
+        self.assertEqual(blocks[-1], "firsatz")
         self.assertTrue(call["caption"].endswith("firsatz"), call["caption"])
         self.assertNotIn("Fırsatı Gönderen", call["caption"], "etiket yazılmaz")
+        self.assertNotIn(text, call["caption"], "alınan satırlar gövdede tekrar etmez")
         self.assertEqual(call["kind"], "photo")
         self.assertEqual(call["filename"], "firsat_1.jpg")
+
+    def test_real_world_offer_uses_the_fixed_order_without_duplicates(self):
+        """Kullanıcı isteği: başlık → 💰 fiyat → 🔗 link → Mesajı Gör → kalan satırlar → kaynak."""
+        client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
+                            "include_keywords": []})
+        text = (
+            "🛍️ Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici "
+            "Banyo ve Duş Jeli 500ml x 4 Adet\n\n"
+            "💰 Fiyat : 225 TL\n\n"
+            "🗓️ 365 Günün En Düşük Fiyatı\n\n"
+            "🛒 https://link.amazon/B02W5SjPe"
+        )
+        self._send(client, text, media=False)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["text"], (
+            "Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici "
+            "Banyo ve Duş Jeli 500ml x 4 Adet"
+            "\n\n💰Fiyat: 225 TL"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
+            "\n\n🔗 https://link.amazon/B02W5SjPe"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
+            "\n\nfirsatz"
+        ))
+        delivered = self.calls[0]["text"]
+        self.assertEqual(delivered.count("225 TL"), 1, "fiyat iki kez yazılmaz")
+        self.assertEqual(delivered.count("https://link.amazon/B02W5SjPe"), 1)
+        self.assertNotIn("Ürün fırsat linki", delivered, "ataç + link yeter")
+        self.assertNotIn("🛍️ Palmolive", delivered, "alınan başlık satırı silinir")
+
+    def test_conditional_price_lands_in_the_price_row_end_to_end(self):
+        """Kullanıcı örneği: 🏷️ 33 TL (3 Adet Alımda 22 TL) üst fiyat satırında görünür."""
+        client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
+                            "include_keywords": []})
+        text = (
+            "Abc Deterjan Çamaşır Sodası (Soda Matik) 500 Gr\n\n"
+            "🏷️ 33 TL (3 Adet Alımda 22 TL)\n\n"
+            "💬 Ortalama fiyatın %31 altında\n\n"
+            "📂 Süpermarket\n\n"
+            "🛍️ Amazon\n\n"
+            "🔗 https://onu.al/feMF"
+        )
+        self._send(client, text, media=False)
+        self.assertEqual(len(self.calls), 1)
+        delivered = self.calls[0]["text"]
+        self.assertEqual(delivered, (
+            "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
+            "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+            "\n\n💬 Ortalama fiyatın %31 altında"
+            "\n📂 Süpermarket"
+            "\n🛍️ Amazon"
+            "\n\n🔗 https://onu.al/feMF"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
+            "\n\nfirsatz"
+        ))
+        self.assertNotIn("🏷️", delivered, "fiyat etiketi tüketilir")
+        self.assertEqual(delivered.count("33 TL"), 1, "fiyat iki kez yazılmaz")
+        self.assertEqual(delivered.count("22 TL"), 1, "3'lü alım fiyatı korunur")
+
+    def test_coupon_share_is_delivered_as_is(self):
+        """Kupon paylaşımında başlık/fiyat yok: bildirim olduğu gibi gider."""
+        client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
+                            "include_keywords": []})
+        text = (
+            "🎟️ Hopi 200 TL ve üzeri alışverişlerde 50 TL indirim kuponu\n\n"
+            "Kod: HOPI50\n\n"
+            "Son kullanım: 31 Ekim"
+        )
+        self._send(client, text, media=False)
+        self.assertEqual(len(self.calls), 1)
+        delivered = self.calls[0]["text"]
+        self.assertEqual(delivered, text + "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1\n\nfirsatz")
+        self.assertNotIn(bot.PRICE_LINE_LABEL, delivered, "kupon mesajına fiyat satırı eklenmez")
 
     def test_source_name_is_bold_and_has_no_link(self):
         """En alttaki kaynak adı: etiketsiz, linksiz, yalnızca KALIN."""
@@ -1217,47 +1295,47 @@ class NotificationTest(unittest.TestCase):
         self.assertEqual([item for item in self.media_calls[0]["entities"] if item["type"] == "bold"],
                          [])
 
-    def test_hidden_entity_link_stays_tappable_and_message_link_is_added(self):
-        """'Fırsata Git' yazısının altına gizlenmiş link kaybolmamalı."""
+    def test_hidden_entity_link_is_shown_once_in_the_fixed_header(self):
+        """'Fırsata Git' CTA'sı tüketilir; gizli ürün linki sabit üst satırda bir kez görünür."""
         client = self._run({"notify_bot_token": "123:ABC"})
-        text = "Fırsata Git 👉 çay"
+        text = "Fırsata Git 👉 çay 5 TL"
         entity = types.MessageEntityTextUrl(
             offset=0, length=len("Fırsata Git"), url="https://amzn.to/3xyz",
         )
         self._send(client, text, entities=[entity])
         caption = self.media_calls[0]["caption"]
         self.assertIn("🔗 Mesajı Gör: https://t.me/firsatz/1", caption)
-        hidden = self._links(self.media_calls[0]["entities"])
-        urls = {item["url"] for item in hidden}
-        self.assertIn("https://amzn.to/3xyz", urls, "gizli link tıklanabilir kalmalı")
-        self.assertNotIn("https://t.me/firsatz/1", urls, "altbilgi linki artık eklenmez")
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/3xyz", caption,
+        self.assertIn("🔗 https://amzn.to/3xyz", caption,
                       "ürün linki sabit üst özette görünmeli")
         self.assertEqual(caption.count("https://amzn.to/3xyz"), 1,
-                         "gizli ürün linki üst özette bir kez yazılmalı")
+                         "gizli ürün linki bir kez yazılmalı")
+        self.assertNotIn("Fırsata Git", caption,
+                         "link etiketi tüketildiği için gövdede kalmaz")
+        urls = {item["url"] for item in self._links(self.media_calls[0]["entities"])}
+        self.assertNotIn("https://t.me/firsatz/1", urls, "altbilgi linki eklenmez")
 
     def test_link_appendix_all_lists_raw_urls_in_notification(self):
         """link_appendix: all → eski davranış: gizli linkler metne de yazılır."""
         client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
                             "link_appendix": "all"})
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/hepsi")
-        self._send(client, "çay", entities=[entity])
+        self._send(client, "çay 5 TL", entities=[entity])
         text = self.calls[0]["text"]
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/hepsi", text)
+        self.assertIn("🔗 https://amzn.to/hepsi", text)
         self.assertEqual(text.count("https://amzn.to/hepsi"), 1,
-                         "ürün linki özette yer alır, aynı link ek olarak yinelenmez")
+                         "ürün linki üst satırda yer alır, aynı link ek olarak yinelenmez")
         self.assertIn("🔗 Mesajı Gör: https://t.me/firsatz/1", text)
 
     def test_button_links_become_inline_keyboard(self):
         client = self._run({"notify_bot_token": "123:ABC", "notify_media": False})
         markup = FakeMarkup([FakeRow([FakeButton("Fırsata Git", inner_url="https://amzn.to/btn")])])
-        self._send(client, "Fırsata git 👇 çay", reply_markup=markup)
+        self._send(client, "Fırsata git 👇 çay 5 TL", reply_markup=markup)
         self.assertEqual(self.media_calls, [])
         self.assertEqual(len(self.calls), 1)
         call = self.calls[0]
         self.assertIn("🔗 Mesajı Gör: https://t.me/firsatz/1", call["text"])
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/btn", call["text"],
-                      "ürün linki sabit özette görünür; inline buton da korunur")
+        self.assertIn("🔗 https://amzn.to/btn", call["text"],
+                      "ürün linki sabit üst satırda görünür; inline buton da korunur")
         keyboard = call["keyboard"]["inline_keyboard"]
         self.assertEqual(keyboard[0], [{"text": "Fırsata Git", "url": "https://amzn.to/btn"}])
         self.assertEqual([button["text"] for button in keyboard[1]], [
@@ -1285,21 +1363,21 @@ class NotificationTest(unittest.TestCase):
         client = self._run({"notify_bot_token": "123:ABC"})
         self._send(client, "ÇAY 5 TL")
         self.assertEqual(len(self.calls), 1, "medya gönderilemezse metin bildirimi gitmeli")
-        self.assertIn("ÇAY 5 TL", self.calls[0]["text"])
-        self.assertIn("🔗 Mesajı Gör: https://t.me/firsatz/1", self.calls[0]["text"])
-        self.assertTrue(self.calls[0]["text"].endswith("firsatz"))
-        self.assertNotIn("Fırsatı Gönderen", self.calls[0]["text"])
+        text = self.calls[0]["text"]
+        self.assertEqual(text.split("\n\n")[:2], ["ÇAY", "💰Fiyat: 5 TL"])
+        self.assertIn("🔗 Mesajı Gör: https://t.me/firsatz/1", text)
+        self.assertTrue(text.endswith("firsatz"))
+        self.assertNotIn("Fırsatı Gönderen", text)
 
     def test_flags_can_disable_appendix_message_link_and_source_name(self):
         client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
                             "link_appendix": "off", "message_link": False,
                             "source_footer": False})
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/yok")
-        self._send(client, "çay", entities=[entity])
+        self._send(client, "çay 5 TL", entities=[entity])
         text = self.calls[0]["text"]
         self.assertEqual(text, (
-            "çay\n\nFiyat: Belirtilmemiş\n\n"
-            "🔗 Ürün fırsat linki: https://amzn.to/yok\n\nçay"
+            "çay\n\n💰Fiyat: 5 TL\n\n🔗 https://amzn.to/yok"
         ))
         self.assertNotIn("Mesajı Gör", text, "message_link=false yalnızca kaynak mesaj linkini kapatır")
         self.assertNotIn("Fırsatı Gönderen", text)
@@ -1416,7 +1494,9 @@ class DeliveryChainTest(unittest.TestCase):
     def test_media_unavailable_falls_back_to_text(self):
         self.client.fail_modes.update({"forward", "copy", "media", "download"})
         self._send("ÇAY 5 TL kampanya")
-        self.assertTrue(any("ÇAY 5 TL" in str(m) for _, m in self.client.sent))
+        delivered = "\n".join(str(m) for _, m in self.client.sent)
+        self.assertIn("💰Fiyat: 5 TL", delivered)
+        self.assertIn("kampanya", delivered, "kalan kaynak satırı korunur")
         self.assertEqual(bot.STATS["modes"].get("text"), 1)
 
     def test_everything_blocked_falls_back_to_link_card(self):
@@ -1605,40 +1685,37 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
         chunks += [str(caption or "") for *_, caption in client.files]
         return "\n".join(chunks)
 
-    def test_hidden_entity_link_stays_tappable_in_text_fallback(self):
-        """Akıllı mod: gizli link mesajın içinde tıklanabilir kalır, ayrıca mesaj linki eklenir."""
+    def test_hidden_entity_link_is_moved_to_the_fixed_header(self):
+        """Sabit düzen: gizli link üst satıra alınır, mesaj linki en altta kalır."""
         self.client.fail_modes.update({"forward", "copy", "media", "download"})
-        text = "çay fırsatı – Fırsata Git"
+        text = "çay fırsatı – Fırsata Git 5 TL"
         entity = types.MessageEntityTextUrl(
             offset=text.index("Fırsata Git"), length=len("Fırsata Git"), url="https://amzn.to/gizli",
         )
         self._send(text, entities=[entity])
         delivered = self._texts(self.client)
-        self.assertIn("Fırsata Git", delivered)
         self.assertIn("https://t.me/firsatz/1", delivered, "Mesajı Gör satırı eklenmeli")
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/gizli", delivered)
+        self.assertIn("🔗 https://amzn.to/gizli", delivered)
         self.assertEqual(delivered.count("https://amzn.to/gizli"), 1,
-                         "ürün linki üst özette bir kez yazılmalı")
-        # Link tıklanabilir kalmalı: entity formatting_entities ile geçirilir.
-        entities = self.client.sent_kwargs[0].get("formatting_entities") or []
-        self.assertIn("https://amzn.to/gizli", [getattr(e, "url", None) for e in entities])
+                         "ürün linki bir kez yazılmalı")
+        self.assertNotIn("Fırsata Git", delivered, "tüketilen CTA etiketi kalmaz")
         self.assertEqual(bot.STATS["modes"].get("text"), 1)
 
-    def test_hidden_entity_link_stays_tappable_in_media_reupload(self):
-        """Fotoğraf yeniden yüklenirken gizli link tıklanabilir kalır, mesaj linki eklenir."""
+    def test_hidden_entity_link_is_moved_to_the_fixed_header_in_media_reupload(self):
+        """Fotoğraf yeniden yüklenirken gizli link üst satıra taşınır, mesaj linki eklenir."""
         self.client.fail_modes.update({"forward", "copy"})
         text = "çay 5 TL"
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/kapak")
         self._send(text, entities=[entity])
         self.assertEqual(len(self.client.files), 1)
         caption = self.client.files[0][2]
-        self.assertIn("çay 5 TL", caption)
+        self.assertEqual(caption.split("\n\n")[:3], [
+            "çay", "💰Fiyat: 5 TL", "🔗 https://amzn.to/kapak",
+        ])
         self.assertIn("https://t.me/firsatz/1", caption)
-        entities = self.client.file_kwargs[0].get("formatting_entities") or []
-        self.assertIn("https://amzn.to/kapak", [getattr(e, "url", None) for e in entities])
 
     def test_link_appendix_all_writes_entity_links_into_copy(self):
-        """link_appendix: all → gizli link ayrıca metin olarak da yazılır."""
+        """link_appendix: all → aynı gizli link ek listede yinelenmez."""
         reset_state()
         path = self._write_config(link_appendix="all")
         self.addCleanup(os.unlink, path)
@@ -1646,21 +1723,21 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
         self.source_id = next(iter(bot.SOURCE_IDS))
         self.client.fail_modes.add("forward")  # metin kopyası incelenecek
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/hepsi")
-        self._send("çay fırsatı", entities=[entity])
+        self._send("çay fırsatı 5 TL", entities=[entity])
         delivered = self._texts(self.client)
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/hepsi", delivered)
+        self.assertIn("🔗 https://amzn.to/hepsi", delivered)
         self.assertEqual(delivered.count("https://amzn.to/hepsi"), 1)
         self.assertIn("https://t.me/firsatz/1", delivered)
 
     def test_button_link_is_written_into_copy(self):
-        """Kullanıcı hesabı inline klavye gönderemez; link metne yazılmalı."""
+        """Kullanıcı hesabı inline klavye gönderemez; link sabit üst satıra yazılmalı."""
         self.client.fail_modes.add("forward")
-        self._send("çay fırsatı", media=False, reply_markup=FakeMarkup([
+        self._send("çay fırsatı 5 TL", media=False, reply_markup=FakeMarkup([
             FakeRow([FakeButton("Fırsata Git", inner_url="https://amzn.to/buton")]),
         ]))
         delivered = self._texts(self.client)
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/buton", delivered)
-        self.assertNotIn("🔗 Fırsata Git", delivered, "sabit ürün linki etiketi kullanılmalı")
+        self.assertIn("🔗 https://amzn.to/buton", delivered)
+        self.assertNotIn("Ürün fırsat linki", delivered, "ataç + link yeter")
 
     def test_text_fallback_lists_hidden_links_and_source(self):
         """Son çare metin: hem buton linki hem orijinal mesaja giden link eklenir."""
@@ -1680,36 +1757,34 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
             "https://wa.me/905551234567 gizli WhatsApp bağlantısı burada 9 TL."
         )
         label = "gizli WhatsApp bağlantısı"
-        label_start = text.index(label)
-        price_start = text.index("9 TL")
+        kept_word = "burada"
         entities = [
             types.MessageEntityTextUrl(
-                offset=bot.utf16_length(text[:label_start]),
+                offset=bot.utf16_length(text[:text.index(label)]),
                 length=bot.utf16_length(label),
                 url="https://chat.whatsapp.com/invite",
             ),
             types.MessageEntityBold(
-                offset=bot.utf16_length(text[:price_start]), length=bot.utf16_length("9 TL"),
+                offset=bot.utf16_length(text[:text.index(kept_word)]),
+                length=bot.utf16_length(kept_word),
             ),
         ]
         self._send(text, media=False, entities=entities)
         delivered = self._texts(self.client)
         self.assertEqual(self.client.forwarded, [], "temizleme gereken ileti forward edilmemeli")
-        self.assertIn("🔥 ÇAY reklamcı WhatsApp'tan bilgi", delivered)
-        self.assertIn("gizli WhatsApp bağlantısı burada 9 TL.", delivered)
+        self.assertIn("reklamcı WhatsApp'tan bilgi gizli WhatsApp bağlantısı burada", delivered)
         self.assertNotIn("#işbirliği", delivered)
         self.assertNotIn("wa.me", delivered)
         self.assertNotIn("chat.whatsapp.com", delivered)
+        self.assertEqual(delivered.split("\n\n")[:2], ["ÇAY", "💰Fiyat: 9 TL"])
         formatting = self.client.sent_kwargs[0].get("formatting_entities") or []
-        self.assertEqual(delivered.split("\n\n")[:3], [
-            "ÇAY", "Fiyat: 9 TL", "🔗 Ürün fırsat linki: Kaynak mesajda bulunamadı",
-        ])
         bold = next(
             entity for entity in formatting
             if type(entity).__name__ == "MessageEntityBold"
-            and bot.utf16_slice(delivered, entity.offset, entity.length) == "9 TL"
+            and bot.utf16_slice(delivered, entity.offset, entity.length) == kept_word
         )
-        self.assertEqual(bot.utf16_slice(delivered, bold.offset, bold.length), "9 TL")
+        self.assertEqual(bot.utf16_slice(delivered, bold.offset, bold.length), kept_word,
+                         "emoji ve silinen parçalardan sonra biçim kaymamalı")
 
     def test_whatsapp_button_is_removed_but_other_button_link_survives(self):
         self._send(
@@ -1741,9 +1816,13 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
         self._send(text, media=False)
         delivered = self._texts(self.client)
         self.assertEqual(self.client.forwarded, [], "temizleme gereken ileti forward edilmemeli")
-        self.assertIn("Urban Care Duş Jeli 500 Ml", delivered)
-        self.assertIn("107 TL / 3 adet alımda 64 TL", delivered)
-        self.assertIn("https://www.amazon.com.tr/dp/B0CB49N31Z", delivered)
+        blocks = delivered.split("\n\n")
+        self.assertEqual(blocks[:3], [
+            "Urban Care Duş Jeli 500 Ml",
+            "💰Fiyat: 107 TL / 3 adet alımda 64 TL",
+            "🔗 https://www.amazon.com.tr/dp/B0CB49N31Z",
+        ])
+        self.assertNotIn("💰 Fiyat : 107", delivered, "alınan fiyat satırı gövdede kalmaz")
         self.assertNotIn("Whatsapp", delivered)
         self.assertNotIn("#amazon", delivered)
         self.assertNotIn("#indirimalarmi", delivered)
@@ -1875,7 +1954,7 @@ class SingleMessageTest(unittest.TestCase):
         self._send(client)
         self.assertEqual(len(client.files), 1, "medya kopyası gruba gitmeli")
         caption = client.files[0][2]
-        self.assertIn("Sıcak ÇAY 5 TL", caption)
+        self.assertEqual(caption.split("\n\n")[:2], ["Sıcak ÇAY", "💰Fiyat: 5 TL"])
         self.assertIn("https://t.me/firsatz/7", caption)
         self.assertEqual(client.deleted[0][1], [101], "hesap kopyasının ID'si")
         self.assertEqual(len(self.calls) + len(self.media_calls), 1,
@@ -2038,10 +2117,13 @@ class DedupFlowTest(MainHarness, unittest.TestCase):
         self.assertEqual(message_id, first_id, "rozet ilk mesaja işlenmeli")
         blocks = text.split("\n\n")
         self.assertEqual(blocks[0], "Sıcak ÇAY")
-        self.assertTrue(blocks[1].startswith("Fiyat: 5 TL"))
-        badge_head = "✅ 2 kaynakta paylaşıldı · teyitli fırsat"
-        self.assertEqual(blocks[2], badge_head, "teyit rozeti fiyatın altına gelmeli")
-        self.assertIn("Sıcak ÇAY 5 TL", text, "gövde korunmalı")
+        self.assertEqual(blocks[1], "💰Fiyat: 5 TL")
+        badge_head = "📌 2 kere paylaşıldı: firsatz"
+        self.assertEqual(blocks[-1], f"firsatz\n{badge_head}",
+                         "çoklu paylaşım notu son bloğu kapatır")
+        self.assertTrue(text.endswith(badge_head), text)
+        self.assertNotIn("Sıcak ÇAY 5 TL", text,
+                         "alınan başlık/fiyat satırı gövdede tekrarlanmaz")
         formatting = kwargs["formatting_entities"]
         badge_entity = next(
             entity for entity in formatting
@@ -2071,8 +2153,11 @@ class DedupFlowTest(MainHarness, unittest.TestCase):
         text = self.client.edited[0][2]
         blocks = text.split("\n\n")
         self.assertEqual(blocks[0], "Philips Airfryer XXL 6.2L")
-        self.assertTrue(blocks[1].startswith("Fiyat: 1.299 TL"))
-        self.assertTrue(blocks[2].startswith("✅ 2 kaynakta paylaşıldı"))
+        self.assertEqual(blocks[1], "💰Fiyat: 1.299 TL")
+        badge_line = text.splitlines()[-1]
+        self.assertTrue(badge_line.startswith("📌 2 kere paylaşıldı:"), badge_line)
+        self.assertIn("firsatz", badge_line, "ilk grubun adı yazılır")
+        self.assertIn(str(second_source_id), badge_line, "ikinci grubun adı da yazılır")
 
     def test_third_copy_escalates_badge_without_stacking(self):
         self._send("Sıcak ÇAY 5 TL")
@@ -2085,22 +2170,22 @@ class DedupFlowTest(MainHarness, unittest.TestCase):
         text = self.client.edited[-1][2]
         blocks = text.split("\n\n")
         self.assertEqual(blocks[0], "Sıcak ÇAY")
-        self.assertTrue(blocks[1].startswith("Fiyat: 5 TL"))
-        self.assertTrue(blocks[2].startswith("🔥 3 kaynakta paylaşıldı"), text)
-        self.assertNotIn("✅ 2 kaynakta", text, "eski rozet yenisiyle değişmeli")
+        self.assertEqual(blocks[1], "💰Fiyat: 5 TL")
+        self.assertTrue(text.endswith("📌 3 kere paylaşıldı: firsatz"), text)
+        self.assertNotIn("2 kere paylaşıldı", text, "eski not yenisiyle değişmeli")
 
-    def test_badge_lists_no_source_names(self):
-        """Kullanıcı isteği: kaynak adları alt alta yazılmasın, tek satır kalsın."""
+    def test_badge_lists_the_source_names_in_the_last_block(self):
+        """Kullanıcı isteği: "2-3-4 kere paylaşıldı şu şu şu gruplarda" — en sonda, tek satır."""
         self._send("Sıcak ÇAY 5 TL")
         self._send("Sıcak ÇAY 5 TL")
         text = self.client.edited[0][2]
         blocks = text.split("\n\n")
         self.assertTrue(blocks[0].startswith("Sıcak ÇAY"))
-        self.assertTrue(blocks[1].startswith("Fiyat: 5 TL"))
-        self.assertTrue(blocks[2].startswith("✅ 2 kaynakta paylaşıldı · teyitli fırsat"), text)
-        self.assertNotIn("📌", text)
+        self.assertEqual(blocks[1], "💰Fiyat: 5 TL")
+        badge = blocks[-1].splitlines()[-1]
+        self.assertEqual(badge, "📌 2 kere paylaşıldı: firsatz")
         self.assertNotIn("Kaynaklar:", text)
-        self.assertEqual(len(blocks[2].splitlines()), 1, "rozet tek satır olmalı")
+        self.assertEqual(text.count("kere paylaşıldı"), 1, "not tek satır, tek kez")
 
     def test_different_titles_send_separately(self):
         self._send("Sıcak ÇAY 5 TL")
@@ -2194,8 +2279,29 @@ class DedupPreloadTest(MainHarness, unittest.TestCase):
         self.assertEqual(client.delivered, [])
         self.assertEqual(bot.STATS["deduped"], 1)
         self.assertEqual(len(client.edited), 1)
-        self.assertEqual(client.edited[0][1], 777, "rozet eski mesaja işlenmeli")
-        self.assertTrue(client.edited[0][2].startswith("Çay 5 TL\n\n✅ 2 kaynakta"), client.edited[0][2])
+        self.assertEqual(client.edited[0][1], 777, "not eski mesaja işlenmeli")
+        self.assertTrue(client.edited[0][2].endswith("📌 2 kere paylaşıldı: firsatz"),
+                        client.edited[0][2])
+
+    def test_new_format_notification_is_indexed_and_badge_closes_the_message(self):
+        """Yeni biçim (💰 Fiyat / 🔗 link) de önbelleğe alınır; not en alta işlenir."""
+        deal = (
+            GROUP_ID,
+            "Çay\n\n💰Fiyat: 5 TL\n\n🔗 Mesajı Gör: https://t.me/firsatz/9\n\nfirsatz",
+            ADMIN_ID, None, None, [], 778,
+        )
+        client = self._run_with_history([deal])
+        self.assertEqual(len(bot.DEDUP_CACHE), 1)
+        self._send_and_settle(client, "Çay 5 TL")
+        self.assertEqual(client.delivered, [])
+        self.assertEqual(bot.STATS["deduped"], 1)
+        self.assertEqual(len(client.edited), 1)
+        self.assertEqual(client.edited[0][1], 778, "not eski mesaja işlenmeli")
+        self.assertIn("💰Fiyat: 5 TL", client.edited[0][2])
+        self.assertTrue(client.edited[0][2].endswith("📌 2 kere paylaşıldı: firsatz"),
+                        client.edited[0][2])
+        self.assertEqual(bot.strip_dedup_badge(client.edited[0][2])[1], deal[1],
+                         "not geri sökülebilmeli (açılış taraması)")
 
     def test_human_chatter_is_never_indexed(self):
         """İnsan sohbeti kayda alınmaz; fırsat kaçmasın diye temkinli taraf seçilir."""
@@ -2232,8 +2338,9 @@ class DedupPreloadTest(MainHarness, unittest.TestCase):
         self._send_and_settle(client, "Çay 5 TL")
         self.assertEqual(client.delivered, [])
         text = client.edited[-1][2]
-        self.assertTrue(text.startswith("Çay 5 TL\n\n🔥🔥 4 kaynakta paylaşıldı"), text)
-        self.assertNotIn("🔥 3 kaynakta", text)
+        self.assertTrue(text.startswith("Çay 5 TL"), text)
+        self.assertTrue(text.endswith("📌 4 kere paylaşıldı: firsatz"), text)
+        self.assertNotIn("🔥🔥 4 kaynakta", text, "eski rozet yeni biçime taşınır")
 
 
 class DedupBotBadgeTest(unittest.TestCase):
@@ -2337,8 +2444,10 @@ class DedupBotBadgeTest(unittest.TestCase):
         self.assertEqual(call["message_id"], self.media_calls[0]["message_id"])
         caption_blocks = call["caption"].split("\n\n")
         self.assertEqual(caption_blocks[0], "Çay fırsatı")
-        badge = "✅ 2 kaynakta paylaşıldı · teyitli fırsat"
-        self.assertEqual(caption_blocks[1], badge)
+        badge = "📌 2 kere paylaşıldı: firsatz"
+        self.assertTrue(call["caption"].endswith(badge), call["caption"])
+        self.assertEqual(caption_blocks[-1], f"firsatz\n{badge}",
+                         "çoklu paylaşım notu en alt bloğu kapatır")
         self.assertIn("Çay fırsatı", call["caption"])
         bold = next(entity for entity in call["entities"]
                     if bot.utf16_slice(call["caption"], entity["offset"], entity["length"]) == badge)
@@ -2357,7 +2466,8 @@ class DedupBotBadgeTest(unittest.TestCase):
         self.assertEqual(call["message_id"], self.ping_calls[0]["message_id"])
         text_blocks = call["text"].split("\n\n")
         self.assertEqual(text_blocks[0], "Çay fırsatı")
-        self.assertTrue(text_blocks[1].startswith("✅ 2 kaynakta paylaşıldı"), call["text"])
+        self.assertTrue(call["text"].endswith("📌 2 kere paylaşıldı: firsatz"), call["text"])
+        self.assertEqual(text_blocks[-1], "firsatz\n📌 2 kere paylaşıldı: firsatz")
 
     def test_third_copy_updates_bot_badge(self):
         client = self._run()
@@ -2370,5 +2480,5 @@ class DedupBotBadgeTest(unittest.TestCase):
         text = self.edit_text_calls[-1]["text"]
         text_blocks = text.split("\n\n")
         self.assertEqual(text_blocks[0], "Çay fırsatı")
-        self.assertTrue(text_blocks[1].startswith("🔥 3 kaynakta paylaşıldı"), text)
-        self.assertNotIn("✅ 2 kaynakta", text)
+        self.assertTrue(text.endswith("📌 3 kere paylaşıldı: firsatz"), text)
+        self.assertNotIn("2 kere paylaşıldı", text, "eski not yeni notla değiştirilir")

@@ -1559,15 +1559,18 @@ class MessageSanitizationTest(unittest.TestCase):
         )
         self.assertNotIn("%F0%9F", buttons["Google Alışveriş"], "emoji sorguya girmemeli")
 
-    def test_cimri_search_url_uses_verified_search_route_and_price_sort(self):
+    def test_cimri_search_url_uses_verified_route_short_query_and_price_sort(self):
+        """Cimri Cloudflare korumalı: sorgu ilk iki kelimeye iner (WAF bloğunu azaltır)."""
         self.assertEqual(
             bot._price_search_url("cimri", "Arzum AR5106 Volume Pro"),
-            "https://www.cimri.com/arama?sort=price,asc&q=Arzum+AR5106+Volume+Pro",
+            "https://www.cimri.com/arama?sort=price,asc&q=Arzum+AR5106",
         )
         self.assertEqual(
             bot._price_search_url("cimri", "  Çamaşır   Deterjanı / 2 Lt "),
-            "https://www.cimri.com/arama?sort=price,asc&q=%C3%87ama%C5%9F%C4%B1r+Deterjan%C4%B1+%2F+2+Lt",
+            "https://www.cimri.com/arama?sort=price,asc&q=%C3%87ama%C5%9F%C4%B1r+Deterjan%C4%B1",
         )
+        self.assertEqual(bot._cimri_search_query("Sıcak ÇAY"), "Sıcak ÇAY")
+        self.assertEqual(bot._cimri_search_query("Philips Airfryer XXL 6.2L"), "Philips Airfryer")
 
     def test_akakce_and_google_search_urls_remain_stable(self):
         self.assertEqual(
@@ -1685,7 +1688,7 @@ class BlankLineNormalizationTest(unittest.TestCase):
         self.assertEqual(bot._blank_line_spans("düz metin"), [])
 
     def test_composed_message_has_one_blank_line_between_sections(self):
-        """Ürün özeti / kaynak içeriği / mesaj linki / grup düzgün bölümlenir."""
+        """Sabit düzen: başlık/fiyat/link üstten alınır, kalan satırlar altta kalır."""
         text = "🔥 A101 Çamaşır Deterjanı 4 Lt\n\n\n\n129,90 TL\n\n\n\nStoklarla sınırlı"
         composed = bot.compose_message(
             make_message(text, media=False, webpage="https://example.com/urun"),
@@ -1694,12 +1697,10 @@ class BlankLineNormalizationTest(unittest.TestCase):
         )
         self.assertEqual(composed["text"], (
             "A101 Çamaşır Deterjanı 4 Lt"
-            "\n\nFiyat: 129,90 TL"
-            "\n\n🔗 Ürün fırsat linki: https://example.com/urun"
-            "\n\n🔥 A101 Çamaşır Deterjanı 4 Lt"
-            "\n\n129,90 TL"
-            "\n\nStoklarla sınırlı"
+            "\n\n💰Fiyat: 129,90 TL"
+            "\n\n🔗 https://example.com/urun"
             "\n\n🔗 Mesajı Gör: https://t.me/firsatz/123"
+            "\n\nStoklarla sınırlı"
             "\n\nFırsatZ"
         ))
 
@@ -1846,7 +1847,8 @@ class NoteCommandMessagesTest(unittest.TestCase):
 
 
 class ComposeMessageTest(unittest.TestCase):
-    def test_product_summary_precedes_original_message_and_source_link(self):
+    def test_fixed_header_takes_title_price_and_link_from_the_source(self):
+        """Sabit düzen: başlık → 💰 fiyat bloğu → 🔗 link; alınan satırlar gövdeden SİLİNİR."""
         text = "1.299 TL\n%50 indirim\n🛍️ Philips Airfryer XXL 6.2L\nFırsata Git"
         label = "Fırsata Git"
         entity = tl_types.MessageEntityTextUrl(
@@ -1860,41 +1862,250 @@ class ComposeMessageTest(unittest.TestCase):
             message_link="https://t.me/firsatz/9",
             source_name="FırsatZ",
         )
-        parts = composed["text"].split("\n\n")
-        self.assertEqual(parts[:3], [
-            "Philips Airfryer XXL 6.2L",
-            "Fiyat: 1.299 TL",
-            "🔗 Ürün fırsat linki: https://amzn.to/5",
-        ])
-        self.assertEqual(parts[3], text, "kaynağın mesajı özetin altına eksiksiz gelmeli")
-        self.assertEqual(parts[4], "🔗 Mesajı Gör: https://t.me/firsatz/9")
-        self.assertEqual(parts[5], "FırsatZ")
-        text_link = next(item for item in composed["entities"]
-                         if type(item).__name__ == "MessageEntityTextUrl")
+        self.assertEqual(composed["text"], (
+            "Philips Airfryer XXL 6.2L"
+            "\n\n💰Fiyat: 1.299 TL"
+            "\n\n%50 indirim"
+            "\n\n🔗 https://amzn.to/5"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/9"
+            "\n\nFırsatZ"
+        ))
+        first_entity = composed["entities"][0]
         self.assertEqual(
-            bot.utf16_slice(composed["text"], text_link.offset, text_link.length), label,
-            "ham mesajdaki gizli link entity'si başlık eklenince de tıklanabilir kalmalı",
+            bot.utf16_slice(composed["text"], first_entity.offset, first_entity.length),
+            "Philips Airfryer XXL 6.2L", "başlık kalın olmalı",
         )
+        self.assertNotIn("Fırsata Git", composed["text"],
+                         "tüketilen gizli link etiketi gövdede tekrar etmemeli")
+        self.assertNotIn("🛍️ Philips", composed["text"], "alınan başlık satırı silinmeli")
+        self.assertEqual(composed["body"], "",
+                         "fiyata bağlı satır (indirim oranı) fiyat bloğuna girer")
+        self.assertLess(
+            composed["text"].index("%50 indirim"),
+            composed["text"].index("🔗 https://amzn.to/5"),
+            "fiyata bağlı satır ürün linkinin ÜSTÜNDE durur (fiyat bloğu)",
+        )
+        self.assertEqual(composed["text"].count("indirim"), 1)
         self.assertNotIn("Fırsatı Gönderen", composed["text"])
         self.assertEqual(bot.source_name_entity(composed)[0]["type"], "bold")
 
-    def test_message_link_line_sits_after_source_message(self):
-        """Ürün linki üst özet içinde, Mesajı Gör kaynak metninden sonra kalır."""
+    def test_message_link_line_sits_after_product_link(self):
+        """🔗 ürün linki üstte, Mesajı Gör en sonda; alınan satır gövdede tekrarlanmaz."""
         button = SimpleNamespace(text="Fırsata Git", url="https://amzn.to/btn", type=None)
         original = "çay 5 TL"
         composed = bot.compose_message(
             make_message(original, buttons=[button]),
             message_link="https://t.me/FirsatZ/31543",
         )
-        self.assertIn("Fiyat: 5 TL", composed["text"])
-        self.assertIn("🔗 Ürün fırsat linki: https://amzn.to/btn", composed["text"])
-        self.assertIn(original, composed["text"])
-        self.assertLess(composed["text"].index("🔗 Ürün fırsat linki"),
-                        composed["text"].index(original))
-        self.assertLess(composed["text"].index(original),
-                        composed["text"].index("Mesajı Gör"))
-        self.assertTrue(composed["text"].endswith("🔗 Mesajı Gör: https://t.me/FirsatZ/31543"))
+        self.assertEqual(composed["text"], (
+            "çay\n\n💰Fiyat: 5 TL\n\n🔗 https://amzn.to/btn"
+            "\n\n🔗 Mesajı Gör: https://t.me/FirsatZ/31543"
+        ))
+        self.assertNotIn(original, composed["text"], "başlık+fiyat alındı, satır tekrarlanmaz")
+        self.assertEqual(composed["body"], "")
         self.assertEqual(composed["source_url"], "https://t.me/FirsatZ/31543")
+
+    def test_consumed_lines_are_removed_and_leftovers_kept(self):
+        """Kullanıcı isteği: veriyi orijinalden al, aldığın yerden sil; kalanı altta bildir."""
+        text = (
+            "🛍️ Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici "
+            "Banyo ve Duş Jeli 500ml x 4 Adet\n\n"
+            "💰 Fiyat : 225 TL\n\n"
+            "🗓️ 365 Günün En Düşük Fiyatı\n\n"
+            "🛒 https://link.amazon/B02W5SjPe"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://link.amazon/B02W5SjPe"),
+            message_link="https://t.me/indirimdeal/50953",
+            source_name="İndirimde Al 🛒 🛍️ Hepsiburada Trendyol N11",
+        )
+        self.assertEqual(composed["text"], (
+            "Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici "
+            "Banyo ve Duş Jeli 500ml x 4 Adet"
+            "\n\n💰Fiyat: 225 TL"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
+            "\n\n🔗 https://link.amazon/B02W5SjPe"
+            "\n\n🔗 Mesajı Gör: https://t.me/indirimdeal/50953"
+            "\n\nİndirimde Al 🛒 🛍️ Hepsiburada Trendyol N11"
+        ))
+        self.assertLess(
+            composed["text"].index("🗓️ 365 Günün En Düşük Fiyatı"),
+            composed["text"].index("🔗 https://link.amazon/B02W5SjPe"),
+            "fiyatla ilgili satır ürün linkinin üstünde kalır",
+        )
+        self.assertEqual(composed["body"], "",
+                         "fiyat bloğuna giren satır gövdede tekrar etmez")
+        self.assertNotIn("Ürün fırsat linki", composed["text"],
+                         "ataç + link yeter; etiket yazılmaz")
+        self.assertNotIn("💰 Fiyat : 225", composed["text"],
+                         "alınan fiyat satırı gövdede kalmaz")
+
+    def test_price_inside_a_url_is_not_treated_as_the_offer_price(self):
+        """Adres içindeki ``…/1299-TL-deal`` fiyat sanılmaz; gerçek fiyat seçilir."""
+        text = "https://shop.example/1299-TL-deal\n🛍️ Çay Makinesi 1.5L\nFiyat: 1.299 TL"
+        message = make_message(text, media=False)
+        self.assertEqual(bot.extract_offer_price(message), "1.299 TL")
+        composed = bot.compose_message(message)
+        self.assertEqual(composed["text"], (
+            "Çay Makinesi 1.5L"
+            "\n\n💰Fiyat: 1.299 TL"
+            "\n\n🔗 https://shop.example/1299-TL-deal"
+        ))
+        self.assertEqual(composed["text"].count("https://shop.example/1299-TL-deal"), 1,
+                         "adres bozulmadan bir kez yazılmalı")
+
+    def test_coupon_message_is_forwarded_as_is(self):
+        """Kupon/duyuru: ürün başlığı ve fiyat yok → biçim kurulmaz, mesaj olduğu gibi gider."""
+        text = (
+            "🎟️ Hopi 200 TL ve üzeri alışverişlerde 50 TL indirim kuponu\n\n"
+            "Kod: HOPI50\n\n"
+            "Son kullanım: 31 Ekim"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False),
+            message_link="https://t.me/firsatz/7",
+        )
+        self.assertEqual(composed["summary"], "", "kupon paylaşımında sabit düzen kurulmaz")
+        self.assertEqual(composed["body"], text, "kupon metni aynen korunur")
+        self.assertEqual(composed["text"], (
+            text + "\n\n🔗 Mesajı Gör: https://t.me/firsatz/7"
+        ))
+        self.assertNotIn(bot.PRICE_LINE_LABEL, composed["text"])
+
+    def test_offer_without_a_price_is_forwarded_as_is(self):
+        """Kullanıcı isteği: "ürün linki ama fiyat yok" → uydurma biçim kurulmaz."""
+        text = "🛍️ Philips Airfryer XXL 6.2L\nSon stoklar\n🔗 https://shop.example/philips"
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://shop.example/philips"),
+            message_link="https://t.me/firsatz/9",
+        )
+        self.assertEqual(composed["summary"], "", "fiyat yoksa sabit düzen kurulmaz")
+        self.assertEqual(composed["body"], text, "kaynak metni aynen korunur")
+        self.assertNotIn(bot.PRICE_LINE_LABEL, composed["text"])
+        self.assertNotIn("Belirtilmemiş", composed["text"])
+        self.assertEqual(composed["text"].count("https://shop.example/philips"), 1,
+                         "link ne gövdede ne ek listede tekrar eder")
+
+    def test_price_threshold_sentence_is_not_an_offer_price(self):
+        """'200 TL üzeri kargo bedava' fiyat değildir; bildirim olduğu gibi kalır."""
+        text = "🛍️ Philips Airfryer XXL\nKargo 200 TL üzeri ücretsiz"
+        composed = bot.compose_message(make_message(text, media=False))
+        self.assertIsNone(bot.extract_offer_price(make_message(text, media=False)))
+        self.assertEqual(composed["text"], "🛍️ Philips Airfryer XXL\nKargo 200 TL üzeri ücretsiz")
+
+    def test_labeled_price_line_moves_conditional_price_into_the_price_row(self):
+        """Kullanıcı örneği: ``🏷️ 33 TL (3 Adet Alımda 22 TL)`` → üst fiyat satırı."""
+        text = (
+            "Abc Deterjan Çamaşır Sodası (Soda Matik) 500 Gr\n"
+            "🏷️ 33 TL (3 Adet Alımda 22 TL)\n"
+            "💬 Ortalama fiyatın %31 altında\n"
+            "📂 Süpermarket\n"
+            "🛍️ Amazon\n"
+            "🔗 https://onu.al/feMF"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://onu.al/feMF"),
+            message_link="https://t.me/onual_ekstra/133797",
+            source_name="OnuAl: Ekstra",
+        )
+        self.assertEqual(composed["text"], (
+            "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
+            "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+            "\n\n💬 Ortalama fiyatın %31 altında"
+            "\n📂 Süpermarket"
+            "\n🛍️ Amazon"
+            "\n\n🔗 https://onu.al/feMF"
+            "\n\n🔗 Mesajı Gör: https://t.me/onual_ekstra/133797"
+            "\n\nOnuAl: Ekstra"
+        ))
+        self.assertLess(
+            composed["text"].index("🛍️ Amazon"),
+            composed["text"].index("🔗 https://onu.al/feMF"),
+            "fiyata bağlı kart satırları ürün linkinin ÜSTÜNDE durur",
+        )
+        self.assertNotIn("🏷️", composed["text"], "fiyat etiketi tüketilir")
+        self.assertEqual(composed["body"].count("33 TL"), 0, "fiyat gövdede tekrar etmez")
+
+    def test_plain_line_between_price_and_link_stays_in_the_body(self):
+        """Fiyata bağlı olmayan düz satır fiyat bloğuna girmez; gövdede korunur."""
+        text = (
+            "🛍️ Çay Makinesi 1.5L\n"
+            "1.299 TL\n"
+            "Kaçırılmayacak fırsat!\n"
+            "🔗 https://amzn.to/9"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://amzn.to/9"),
+            message_link="https://t.me/firsatz/9",
+        )
+        self.assertEqual(composed["text"], (
+            "Çay Makinesi 1.5L"
+            "\n\n💰Fiyat: 1.299 TL"
+            "\n\n🔗 https://amzn.to/9"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/9"
+            "\n\nKaçırılmayacak fırsat!"
+        ))
+        self.assertEqual(composed["body"], "Kaçırılmayacak fırsat!")
+
+    def test_price_bound_lines_rise_above_the_product_link_without_a_link_line(self):
+        """Link metinde satır olarak yoksa da (önizleme/buton) fiyata bağlı satırlar üste girer."""
+        text = "🛍️ Çay Makinesi 1.5L\n1.299 TL\n🗓️ 365 Günün En Düşük Fiyatı"
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://amzn.to/9"),
+            message_link="https://t.me/firsatz/9",
+        )
+        self.assertEqual(composed["text"], (
+            "Çay Makinesi 1.5L"
+            "\n\n💰Fiyat: 1.299 TL"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
+            "\n\n🔗 https://amzn.to/9"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/9"
+        ))
+        self.assertEqual(composed["body"], "")
+
+    def test_price_line_with_extra_info_moves_the_rest_into_the_price_row(self):
+        """'107 TL / 3 adet alımda 64 TL' → fiyatla ilgili TÜM veri üst fiyat satırına girer."""
+        text = (
+            "🛍️ Urban Care Duş Jeli 500 Ml\n\n"
+            "💰 Fiyat : 107 TL / 3 adet alımda 64 TL\n\n"
+            "https://www.amazon.com.tr/dp/B0CB49N31Z"
+        )
+        composed = bot.compose_message(make_message(text, media=False))
+        self.assertEqual(composed["text"], (
+            "Urban Care Duş Jeli 500 Ml"
+            "\n\n💰Fiyat: 107 TL / 3 adet alımda 64 TL"
+            "\n\n🔗 https://www.amazon.com.tr/dp/B0CB49N31Z"
+        ))
+        self.assertEqual(composed["body"], "", "fiyat satırı tümüyle tüketilir")
+
+    def test_unlabeled_price_line_with_a_second_price_joins_the_price_row(self):
+        """Emoji/etiket olmasa da satırın devamı fiyat içeriyorsa üst satıra taşınır."""
+        text = "Çay Seti\n33 TL (3 Adet Alımda 22 TL)"
+        composed = bot.compose_message(make_message(text, media=False))
+        self.assertEqual(composed["text"], (
+            "Çay Seti\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+        ))
+        self.assertEqual(composed["body"], "")
+
+    def test_leftover_entities_are_remapped_after_consumption(self):
+        """Başlık/fiyat silinince kalan satırın biçimi kaymamalı (UTF-16)."""
+        text = "🛍️ Çay Bardağı 6'lı Set\n129,90 TL Stoklarla sınırlı"
+        label = "Stoklarla sınırlı"
+        entity = tl_types.MessageEntityBold(
+            offset=bot.utf16_length(text[:text.index(label)]),
+            length=bot.utf16_length(label),
+        )
+        composed = bot.compose_message(make_message(text, entities=[entity], media=False))
+        self.assertEqual(composed["text"], (
+            "Çay Bardağı 6'lı Set\n\n💰Fiyat: 129,90 TL\n\nStoklarla sınırlı"
+        ))
+        bold = [item for item in composed["entities"]
+                if type(item).__name__ == "MessageEntityBold"
+                and bot.utf16_slice(composed["text"], item.offset, item.length) != "Çay Bardağı 6'lı Set"]
+        self.assertEqual(len(bold), 1, composed["entities"])
+        self.assertEqual(
+            bot.utf16_slice(composed["text"], bold[0].offset, bold[0].length), label,
+        )
 
     def test_source_name_is_bold_at_the_bottom_without_label_or_link(self):
         """Kullanıcı isteği: en altta yalnızca grup adı, kalın; etiket ve link yok."""
@@ -1938,8 +2149,8 @@ class ComposeMessageTest(unittest.TestCase):
         self.assertIsNone(composed["source_name"])
         self.assertEqual(bot.source_name_entity(composed), [])
 
-    def test_entity_links_are_not_rewritten_by_default(self):
-        """Varsayılan: gizli link tıklanabilir kalır, 'Fırsata Git: url' satırı eklenmez."""
+    def test_entity_link_stays_clickable_when_there_is_no_offer_header(self):
+        """Başlık bulunamazsa gövde yeniden kurulmaz; gizli link tıklanabilir kalır."""
         text = "Fırsata Git 👉"
         offset = bot.utf16_length(text[:text.index("Fırsata Git")])
         entity = tl_types.MessageEntityTextUrl(offset=offset, length=bot.utf16_length("Fırsata Git"),
@@ -1948,11 +2159,34 @@ class ComposeMessageTest(unittest.TestCase):
             make_message(text, entities=[entity]),
             message_link="https://t.me/FirsatZ/31543",
         )
+        self.assertEqual(composed["body"], text, "ürün özeti kurulamayınca gövde korunur")
         self.assertNotIn("https://amzn.to/gizli", composed["text"], "link tekrar yazılmamalı")
         self.assertIn("🔗 Mesajı Gör: https://t.me/FirsatZ/31543", composed["text"])
         # Link yine de tıklanabilir: gövdeye ait entity çağıran tarafından korunur.
         self.assertEqual(
             bot.entities_for_text(make_message(text, entities=[entity]), composed["body"]), [entity],
+        )
+
+    def test_hidden_cta_label_is_consumed_when_the_header_is_built(self):
+        """Başlık varsa gizli link etiketi (CTA) tüketilir; link sabit üst satırda görünür."""
+        text = "Fırsata Git 👉 çay 5 TL"
+        entity = tl_types.MessageEntityTextUrl(
+            offset=0, length=bot.utf16_length("Fırsata Git"), url="https://amzn.to/gizli",
+        )
+        composed = bot.compose_message(
+            make_message(text, entities=[entity], media=False),
+            message_link="https://t.me/FirsatZ/31543",
+        )
+        self.assertEqual(composed["text"], (
+            "çay\n\n💰Fiyat: 5 TL\n\n🔗 https://amzn.to/gizli"
+            "\n\n🔗 Mesajı Gör: https://t.me/FirsatZ/31543"
+        ))
+        self.assertEqual(composed["text"].count("https://amzn.to/gizli"), 1,
+                         "link bir kez yazılmalı")
+        self.assertNotIn("Fırsata Git", composed["text"], "CTA etiketi tüketildi")
+        self.assertEqual(
+            [item for item in composed["entities"]
+             if type(item).__name__ == "MessageEntityTextUrl"], [],
         )
 
     def test_source_line_is_dropped_when_it_cannot_fit(self):
@@ -2217,29 +2451,41 @@ class DedupBadgeTest(unittest.TestCase):
         self.assertEqual(bot.dedup_badge(0), "")
 
     def test_emphasis_escalates_with_count(self):
-        two = bot.dedup_badge(2)
-        three = bot.dedup_badge(3)
-        four = bot.dedup_badge(4)
-        five = bot.dedup_badge(5)
-        self.assertTrue(two.startswith("✅ 2 kaynakta paylaşıldı"), two)
-        self.assertTrue(three.startswith("🔥 3 kaynakta paylaşıldı"), three)
-        self.assertTrue(four.startswith("🔥🔥 4 kaynakta paylaşıldı"), four)
-        self.assertIn("5 KAYNAKTA PAYLAŞILDI", five)
-        self.assertIn("🚨", five)
+        two = bot.dedup_badge(2, sources=["FirsatZ", "İndirimde Al"])
+        three = bot.dedup_badge(3, sources=["A", "B", "C"])
+        four = bot.dedup_badge(4, sources=["A", "B", "C", "D"])
+        five = bot.dedup_badge(5, sources=["A", "B", "C", "D", "E"])
+        self.assertEqual(two, "📌 2 kere paylaşıldı: FirsatZ, İndirimde Al")
+        self.assertTrue(three.startswith("📌 3 kere paylaşıldı:"), three)
+        self.assertTrue(four.startswith("📌 4 kere paylaşıldı:"), four)
+        self.assertTrue(five.startswith("🚨 5 kere paylaşıldı:"), five)
+        self.assertIn("KAÇIRMA", five)
 
-    def test_badge_is_a_single_line_with_the_trust_tag(self):
-        """Kullanıcı isteği: kaynak adları alt alta yazılmasın, tek satır yeter."""
-        for count in (2, 3, 4):
-            with self.subTest(count=count):
-                badge = bot.dedup_badge(count)
-                self.assertNotIn("\n", badge, badge)
-                self.assertNotIn("📌", badge, "kaynak listesi satırı olmamalı")
-                self.assertIn("teyitli fırsat", badge, badge)
-                self.assertIn(str(count), badge, badge)
+    def test_badge_lists_the_group_names_in_one_line(self):
+        """Kullanıcı isteği: "2-3-4 kere paylaşıldı şu şu şu gruplarda" — tek satır."""
+        badge = bot.dedup_badge(3, sources=["FirsatZ", "İndirimde Al", "OnuAl"])
+        self.assertNotIn("\n", badge, badge)
+        self.assertEqual(badge, "📌 3 kere paylaşıldı: FirsatZ, İndirimde Al, OnuAl")
+        self.assertEqual(bot.dedup_badge(2), "📌 2 kere paylaşıldı",
+                         "grup adı yoksa sayı yeter")
+
+    def test_repeated_group_names_are_written_once(self):
+        self.assertEqual(bot.dedup_badge(2, sources=["A", "A", "B"]),
+                         "📌 2 kere paylaşıldı: A, B")
+
+    def test_badge_sources_are_read_back(self):
+        badge = bot.dedup_badge(4, sources=["FirsatZ", "İndirimde Al"])
+        self.assertEqual(bot.dedup_badge_sources(badge), ["FirsatZ", "İndirimde Al"])
+        loud = bot.dedup_badge(6, sources=["A", "B"])
+        self.assertEqual(bot.dedup_badge_sources(loud), ["A", "B"])
+        self.assertEqual(bot.dedup_badge_sources("🔥 4 kaynakta paylaşıldı!!"), [],
+                         "eski biçimde grup adı yok")
 
     def test_short_badge_is_headline_only(self):
-        self.assertNotIn("\n", bot.dedup_badge(5, short=True))
-        self.assertIn("5", bot.dedup_badge(5, short=True))
+        short = bot.dedup_badge(5, sources=["FirsatZ", "İndirimde Al"], short=True)
+        self.assertNotIn("\n", short)
+        self.assertNotIn("FirsatZ", short, "dar açıklamada grup adları yazılmaz")
+        self.assertIn("5", short)
 
 
 class StripDedupBadgeTest(unittest.TestCase):
@@ -2260,13 +2506,20 @@ class StripDedupBadgeTest(unittest.TestCase):
         self.assertEqual((count, base), (7, "Çay"))
 
     def test_badge_roundtrip(self):
-        """Üretilen her rozet geri sökülebilmeli (açılış taraması için)."""
+        """Üretilen her not (en altta) geri sökülebilmeli (güncelleme + açılış taraması)."""
         for count in (2, 3, 4, 5, 12):
             for short in (False, True):
-                badge = bot.dedup_badge(count, short=short)
-                parsed, base = bot.strip_dedup_badge(f"{badge}\n\nGövde")
+                badge = bot.dedup_badge(count, sources=["FirsatZ", "İndirimde Al"], short=short)
+                parsed, base = bot.strip_dedup_badge(f"Gövde\n\n{badge}")
                 self.assertEqual(parsed, count, badge)
                 self.assertEqual(base, "Gövde", badge)
+
+    def test_legacy_badge_under_the_price_line_is_still_removed(self):
+        """Eski gönderilmiş rozetler (fiyat satırının altında) da sökülebilmeli."""
+        text = "Çay\n\n💰Fiyat: 5 TL\n\n✅ 2 kaynakta paylaşıldı · teyitli fırsat\n\nfirsatz"
+        parsed, base = bot.strip_dedup_badge(text)
+        self.assertEqual(parsed, 2)
+        self.assertEqual(base, "Çay\n\n💰Fiyat: 5 TL\n\nfirsatz")
 
     def test_lookalike_first_line_is_not_a_badge(self):
         text = "2 kaynakta paylaşıldı yazan normal bir satır\nGövde"
@@ -2274,32 +2527,42 @@ class StripDedupBadgeTest(unittest.TestCase):
 
 
 class DedupPrefixAndRebaseTest(unittest.TestCase):
-    def test_badge_goes_under_first_line_when_no_price_line_exists(self):
+    def test_badge_closes_the_message_under_the_source_block(self):
+        """Kullanıcı isteği: not en alta, son bloğa eklenir ve mesaj orada kapanır."""
         base = "Ürün başlığı\n\nKampanya açıklaması\n\nKaynak satırı"
-        badge = bot.dedup_badge(2)
+        badge = bot.dedup_badge(2, sources=["Kaynak satırı", "FirsatZ"])
         updated, insert_at, insert_length, badge_at = bot.dedup_badge_insertion(base, badge)
-        self.assertEqual(
-            updated,
-            f"Ürün başlığı\n\n{badge}\n\nKampanya açıklaması\n\nKaynak satırı",
-        )
-        self.assertGreater(insert_at, 0)
-        self.assertGreater(insert_length, 0)
+        self.assertEqual(updated, f"{base}\n{badge}")
+        self.assertEqual(insert_at, len(base))
+        self.assertEqual(insert_length, len(badge) + 1)
         self.assertEqual(
             bot.utf16_slice(updated, badge_at, bot.utf16_length(badge)), badge,
         )
         self.assertEqual(bot.strip_dedup_badge(updated), (2, base))
 
-    def test_badge_goes_immediately_after_price_line(self):
-        base = "Ürün\n\nFiyat: 5 TL\n\n🔗 Ürün fırsat linki: https://example.com/p"
-        badge = bot.dedup_badge(2)
+    def test_badge_never_lands_in_the_middle_even_with_a_price_line(self):
+        base = ("Ürün\n\n💰Fiyat: 5 TL\n\n🔗 https://example.com/p\n\n"
+                "🔗 Mesajı Gör: https://t.me/firsatz/1\n\nfirsatz")
+        badge = bot.dedup_badge(3, sources=["firsatz", "İndirimde Al"])
         updated, _, _, badge_at = bot.dedup_badge_insertion(base, badge)
-        self.assertEqual(
-            updated,
-            "Ürün\n\nFiyat: 5 TL\n\n" + badge
-            + "\n\n🔗 Ürün fırsat linki: https://example.com/p",
-        )
+        self.assertEqual(updated, f"{base}\n{badge}")
+        self.assertTrue(updated.endswith(badge), "not bildirimi kapatır")
         self.assertEqual(bot.utf16_slice(updated, badge_at, bot.utf16_length(badge)), badge)
-        self.assertEqual(bot.strip_dedup_badge(updated), (2, base))
+        self.assertEqual(bot.strip_dedup_badge(updated), (3, base))
+
+    def test_price_line_is_recognized_with_the_money_emoji(self):
+        """Yeni biçim ``💰Fiyat: 5 TL``; boşluklu eski yazım da tanınır."""
+        self.assertTrue(bot.is_price_line("💰Fiyat: 5 TL"))
+        self.assertTrue(bot.is_price_line("💰 Fiyat: 5 TL"), "boşluklu eski yazım")
+        self.assertTrue(bot.is_price_line("Fiyat: 5 TL"), "eski biçim de tanınır")
+        self.assertFalse(bot.is_price_line("Sepette 5 TL"))
+        self.assertFalse(bot.is_price_line("🔗 https://example.com"))
+        base = "Sıcak ÇAY\n\n💰Fiyat: 5 TL\n\n🔗 https://example.com/p"
+        badge = bot.dedup_badge(3, sources=["firsatz"])
+        updated, _, _, badge_at = bot.dedup_badge_insertion(base, badge)
+        self.assertEqual(updated, f"{base}\n{badge}")
+        self.assertEqual(bot.utf16_slice(updated, badge_at, bot.utf16_length(badge)), badge)
+        self.assertEqual(bot.strip_dedup_badge(updated), (3, base))
 
     def test_prefix_is_empty_without_badge(self):
         self.assertEqual(bot.dedup_current_prefix("Sıcak ÇAY"), "")
@@ -2307,7 +2570,8 @@ class DedupPrefixAndRebaseTest(unittest.TestCase):
         self.assertEqual(bot.dedup_current_prefix(None), "")
 
     def test_prefix_covers_badge_block(self):
-        badge = bot.dedup_badge(3)
+        # `dedup_current_prefix` yalnızca ESKİ üst-rozet biçimini tanır.
+        badge = "🔥 3 kaynakta paylaşıldı! · teyitli fırsat"
         full = f"{badge}\n\nGövde"
         self.assertEqual(bot.dedup_current_prefix(full), f"{badge}\n\n")
 

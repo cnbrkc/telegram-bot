@@ -295,7 +295,8 @@ Alanların hepsi [3. bölümde](#3-ayarlar-configjson) tek tek anlatılıyor. ID
 - **Geçmişe dönük mesajlar otomatik iletilmez.** Bot kapalıyken veya yeniden başlatılırken kaçanlar
   sonradan bildirim olarak backfill edilmez; `/analiz` ve `/kaynaktest` geçmişi yalnızca
   manuel kontrol/analiz için okur.
-- Aynı başlıklı fırsatlar tek mesajda birleşir; tekrarlar ilk mesaja rozet olarak işlenir
+- Aynı başlıklı fırsatlar tek mesajda birleşir; tekrarlar gruba atılmaz, ilk mesajın en alt
+  bloğuna `📌 N kere paylaşıldı: <gruplar>` notu işlenir
   ([9. bölüm](#9-tekrar-birleştirme-aynı-fırsat-tek-mesaj)).
 - **GitHub Actions kalıcı sunucu değildir.** Job yaklaşık 5 saat 50 dakika çalışır, sonra
   yeniden başlatılır. Başlatmalar arasında kısa boşluklar olabilir.
@@ -339,7 +340,7 @@ Alanların hepsi [3. bölümde](#3-ayarlar-configjson) tek tek anlatılıyor. ID
 | `notify_media` | `true` / `false` | Bildirim botu fotoğraf/videoyu da göndersin. |
 | `clean_commands` | `true` / `false` | **Komut temizliği.** `control_chat`'te yeni bir komut yazıldığında bir önceki komut ve bot yanıtı silinir; ekranda yalnızca son mesaj kalır. İndirim bildirimleri bu temizliğin **dışındadır, asla silinmez.** Varsayılan `true`. |
 | `single_message` | `true` / `false` | **Tek mesaj modu.** Bildirim botu mesajı gruba attıysa, hesabın attığı kopya gruptan silinir; böylece her fırsat tek mesaj olarak kalır. Bildirim gidemezse kopya **silinmez**. Varsayılan `true`. |
-| `dedup_enabled` | `true` / `false` | **Tekrar birleştirme.** Normalize ürün sorgusu aynı olan fırsatlar tek mesajda toplanır; tekrarlar gruba atılmaz, ilk mesaja `✅ 2 kaynakta paylaşıldı · teyitli fırsat` gibi **tek satırlık** rozet işlenir ([9. bölüm](#9-tekrar-birleştirme-aynı-fırsat-tek-mesaj)). Varsayılan `true`. |
+| `dedup_enabled` | `true` / `false` | **Tekrar birleştirme.** Normalize ürün sorgusu aynı olan fırsatlar tek mesajda toplanır; tekrarlar gruba atılmaz, ilk mesajın son bloğuna `📌 2 kere paylaşıldı: <gruplar>` gibi **tek satırlık** not işlenir ([9. bölüm](#9-tekrar-birleştirme-aynı-fırsat-tek-mesaj)). Varsayılan `true`. |
 | `dedup_window_hours` | sayı | Normalize ürün sorgusu kaç saat boyunca "aynı fırsat" sayılsın (1–72, varsayılan 12). |
 | `dedup_scan_limit` | sayı | Açılışta önbelleğe alınacak son ileti sayısı (0–100, varsayılan 100; `0` = tarama yapma). |
 | `control_chat` | sayı / `"me"` | Eski kontrol sohbeti; `private_control: true` iken yalnızca Kayıtlı Mesajlar yedeği aktiftir. |
@@ -595,34 +596,84 @@ Takipçi **kendi Telegram hesabınla** gönderir; Telegram kendi gönderdiğin m
 bildirim üretmez. Bu yüzden fırsat gruba düşse bile telefonuna uyarı gelmez. Çözüm: gruba
 ikinci bir gönderici olarak küçük bir bot eklemek — bildirimi onun attığı mesaj üretir.
 
-**Bildirim biçimi:** önce ürün özeti, ardından temizlenmiş kaynak mesajı, orijinal
-mesaj bağlantısı ve en altta kalın kaynak adı. Sabit sıra şöyledir:
+**Bildirim biçimi (sabit düzen):** başlık → `💰Fiyat: …` (fiyat satırındaki tüm veri +
+fiyata bağlı kart satırları) → `🔗 <ürün linki>` (fiyat bloğunun **altına** inen 3. blok;
+satır olarak hemen altında olmak zorunda değil) → `🔗 Mesajı Gör: <t.me linki>` →
+kaynaktan **alınmayan** satırlar ve gizli linkler → en altta kalın kaynak adı; çoklu
+paylaşım notu bu son bloğu kapatır. Başlık, fiyat ve ürün linki kaynak mesajdan
+**alınır** ve alındıkları satırlardan **silinir** (kullanıcı isteği: "benim format için
+orijinalden veriyi al, aldıklarını da aldığın yerden sil"); böylece aynı bilgi bildirimde
+iki kez görünmez. Fiyata bağlı satırlar (`💬 Ortalama fiyatın %31 altında`,
+`📂 Süpermarket`, `🛍️ Amazon`, `🗓️ 365 Günün En Düşük Fiyatı`) fiyat bloğuna girer;
+başka satırlar gövdede aynen korunur: **veri kaybı yok**.
+
+**İstisna — ürün değil, duyuru:** biçim yalnızca **ürün başlığı ve fiyat birlikte**
+bulunduğunda kurulur. Kupon/duyuru paylaşımlarında (örn.
+`🎟️ Hopi 200 TL ve üzeri alışverişlerde 50 TL indirim kuponu`) ikisi de olmaz; o
+mesajlar biçime sokulmadan **olduğu gibi** iletilir (kullanıcı isteği: "istisnai
+durumlarda bildirimleri olduğu gibi atsın"). Yardımcı kurallar:
+
+- Kupon satırındaki tutarlar (`… kupon`, `… indirim kodu`) ve eşik ifadeleri
+  (`200 TL ve üzeri kargo bedava`) **fiyat sayılmaz**; bu yüzden kupon mesajı yanlışlıkla
+  ürün bildirimine dönüşmez.
+- Kredi kartı/adres gibi fiyat içermeyen bilgiler başlık olarak seçilse bile fiyat
+  bulunmadığı için biçim kurulmaz.
+
+Fiyatla ilgili **tüm** veri üst fiyat satırındadır: kaynakta
+`🏷️ 33 TL (3 Adet Alımda 22 TL)` yazıyorsa bildirimde
+`💰Fiyat: 33 TL (3 Adet Alımda 22 TL)` olarak görünür — asıl fiyat (3'lü alımda 22 TL)
+üstte kaçmaz. Fiyat satırı tümüyle tüketilir; ek bilgi aşağıda tekrar etmez.
 
 ```text
-Philips Airfryer XXL 6.2L
+Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici Banyo ve Duş Jeli 500ml x 4 Adet
 
-Fiyat: 1.299 TL
+💰Fiyat: 225 TL
 
-🔗 Ürün fırsat linki: https://amzn.to/ornek
+🗓️ 365 Günün En Düşük Fiyatı      ← fiyata bağlı satır: fiyat bloğunda, linkin ÜSTÜNDE
 
-1.299 TL
-%50 indirim
-🛍️ Philips Airfryer XXL 6.2L
-Fırsata Git
+🔗 https://link.amazon/B02W5SjPe
 
-🔗 Mesajı Gör: https://t.me/firsatz/31543
+🔗 Mesajı Gör: https://t.me/indirimdeal/50953
 
-FırsatZ          ← kalın, etiketsiz, linksiz
+İndirimde Al 🛒 🛍️ Hepsiburada Trendyol N11        ← kalın, etiketsiz, linksiz (son blok)
+📌 2 kere paylaşıldı: İndirimde Al, FırsatZ   ← çoklu paylaşım notu bu bloğu kapatır
 ```
 
-Çok kaynaklı teyit rozeti varsa **fiyat satırının hemen altına**, ürün fırsat linkinden
-önce eklenir; mesaj başına taşınmaz. Fiyat bulunamazsa `Fiyat: Belirtilmemiş`, ürün
-başlığı veya mağaza linki ayıklanamazsa ilgili özet satırında açıklayıcı yer tutucu gösterilir.
-Özet yerel metin ayıklamasıyla hazırlanır; ağa gidilmediği için bildirimde ekstra gecikme
-yaratmaz. Arama düğmeleri gövdeye karakter eklemeden inline klavyede kalır.
+Kurallar:
+
+- Kaynakta ürün linki yalnızca bir satırın tamamıysa (`🛒 https://…`), bir gizli
+  hyperlink etiketi CTA ise (`Fırsata Git`) ya da bir satır yalnızca fiyat etiketiyse
+  (`💰 Fiyat : 225 TL`) satır tümüyle düşer: bilgi üst blokta zaten vardır.
+- Fiyatla ilgili ek veri varsa fiyatla birlikte üste taşınır:
+  `💰 Fiyat : 107 TL / 3 adet alımda 64 TL` → üst satır
+  `💰Fiyat: 107 TL / 3 adet alımda 64 TL` (altta tekrar etmez).
+- Fiyat **etiketsiz** bir satırın başındaysa ve devamı fiyat içeriyorsa
+  (`33 TL (3 Adet Alımda 22 TL)`) o veri de üste taşınır; başka veri içeriyorsa yalnızca
+  fiyat tüketilir, kalanı gövdede kalır: `129,90 TL Stoklarla sınırlı` →
+  `💰Fiyat: 129,90 TL` + gövdede `Stoklarla sınırlı`. Satırda URL varsa satır bütün
+  olarak silinmez, link kaybolmaz.
+- Fiyat satırıyla ürün linki arasında duran **fiyata bağlı** satırlar fiyat bloğuna
+  girer ve ürün linkinin **üstünde** görünür (ürün linki bir satır değil, 3. bloktur:
+  fiyat bloğunun altına iner). Fiyata bağlı sayılma ölçütü: satır emoji/işaretle
+  başlıyor (`💬 Ortalama fiyatın %31 altında`, `📂 Süpermarket`, `🛍️ Amazon`,
+  `🗓️ 365 Günün En Düşük Fiyatı`) ya da yüzde/indirim ifadesi taşıyor (`%50 indirim`).
+  Düz metin satırları (örn. `Kaçırılmayacak fırsat!`) fiyat bloğuna girmez, gövdede
+  kalır; alınan satırlar tekrar yazılmaz.
+- Gizli hyperlink'in görünen etiketi anlamlı bir metinse (ürün ya da kampanya adı gibi)
+  dokunulmaz ve kaynak mesajdaki yazı tıklanabilir kalır.
+- Ürün başlığı **veya** fiyat ayıklanamazsa gövde yeniden kurulmaz: mesaj olduğu gibi
+  (temizlik + ek bağlantılar + `Mesajı Gör` ile) iletilir. Ürün linki bulunamazsa
+  biçim kurulur ama link satırı hiç yazılmaz.
+- Çoklu paylaşım notu **en alt bloğa**, kaynak grup adının altına eklenip mesajı
+  kapatır: `📌 3 kere paylaşıldı: FırsatZ, İndirimde Al, OnuAl`; mesaj başına taşınmaz
+  (bkz. 9. bölüm).
+- Özet yerel metin ayıklamasıyla hazırlanır; ağa gidilmediği için bildirimde ekstra
+  gecikme yaratmaz. Arama düğmeleri gövdeye karakter eklemeden inline klavyede kalır.
 
 Bölümler (başlık/fiyat, ürün linki, `Mesajı Gör`, kaynak grup adı) arasında **tam bir
-boş satır** olur; fazlası değil. Reklam/işbirliği etiketi veya WhatsApp bağlantısı
+boş satır** olur; fazlası değil. Fiyat bloğuna giren kart satırları fiyat satırının
+hemen altında tek satır aralığıyla durur (kendi bloğu içinde boş satır olmaz).
+Reklam/işbirliği etiketi veya WhatsApp bağlantısı
 silinince geriye kalan çoklu boş satırlar otomatik olarak tek boş satıra indirilir,
 baş/sondaki boş satırlar atılır. Bu sıkıştırma **yalnızca** boşluk, tab, `\r` ve satır
 sonu karakterlerini alır — metin içeriği, emojiler ve entity offset'leri korunur, veri
@@ -706,8 +757,8 @@ denenmez; sırayla deneyip ilk başarılı olanı kullanır:
 
 | Gizleme yolu | Örnek | Bot ne yapar |
 |---|---|---|
-| Metin altına gizlenmiş hyperlink | "**Fırsata Git**" yazısı görünür, link altındadır | Ürün/mağaza linkiyse sabit özette gösterilir; kaynak mesajındaki yazı da tıklanabilir kalır |
-| Inline buton | Yazıda link yok, butondadır | Bot bildirimi URL düğmesini korur; ürün linkiyse sabit özetin `Ürün fırsat linki` satırında da görünür |
+| Metin altına gizlenmiş hyperlink | "**Fırsata Git**" yazısı görünür, link altındadır | Ürün/mağaza linkiyse sabit üst bloktaki `🔗 <link>` satırına alınır; CTA etiketi ("Fırsata Git") tüketilir, anlamlı bir etiketse kaynak mesajda tıklanabilir kalır |
+| Inline buton | Yazıda link yok, butondadır | Bot bildirimi URL düğmesini korur; ürün linkiyse sabit üst bloktaki `🔗 <link>` satırında da görünür |
 | Link önizlemesi | Metinde link yok, önizleme kartı var | Ürün/mağaza hedefi ürün özetine; diğer hedefler ek link listesine girer |
 
 Bildirim botu, kaynakta aynı arama hizmetine ait bir URL/buton yoksa eksik düğmeleri şu
@@ -715,14 +766,33 @@ sırayla ekler:
 
 1. **Google Alışveriş** — `https://www.google.com/search?udm=28&q=<ürün>&hl=tr&gl=tr`
 2. **Akakçe'de ara** — `https://www.akakce.com/arama/?q=<ürün>`
-3. **Cimri'de ara** — `https://www.cimri.com/arama?sort=price,asc&q=<ürün>`
+3. **Cimri'de ara** — `https://www.cimri.com/arama?sort=price,asc&q=<ürün ilk iki kelime>`
 
 Cimri arama sonuçlarında gözlenen kalıp `/arama` yolu, `q` sorgu parametresi ve
 `sort=price,asc` fiyat sıralamasıdır. Örnek:
-`https://www.cimri.com/arama?sort=price,asc&q=Arzum+AR5106+Volume+Pro`.
-Sorgudaki Türkçe karakterler ve özel karakterler URL-encode edilir. Araştırma sırasında
-Cimri sayfasının doğrudan açılması HTTP 500 döndürdüğü için sıralama davranışı canlı sayfada
-bağımsız doğrulanamadı; URL kalıbı indekslenmiş Cimri arama sonuçlarıyla destekleniyor.
+`https://www.cimri.com/arama?sort=price,asc&q=Arzum+AR5106`. Sorgudaki Türkçe karakterler
+ve özel karakterler URL-encode edilir. Araştırma sırasında Cimri sayfasının doğrudan
+açılması HTTP 500 döndürdüğü için sıralama davranışı canlı sayfada bağımsız doğrulanamadı;
+URL kalıbı indekslenmiş Cimri arama sonuçlarıyla destekleniyor.
+
+**Cimri Cloudflare korumalıdır.** Site, "Sorry, you have been blocked" sayfasını
+Cloudflare WAF/Access kuralları üzerinden gösterir; bu kuralı site sahibi yönetir ve
+bağlantı üreten taraf olarak biz engeli kaldıramayız. Cloudflare engeli tipik olarak şu
+durumlarda tetiklenir:
+
+- uzun ve yoğun URL-encode edilmiş sorgu dizeleri (WAF'ın şüpheli istek puanı yükselir),
+- kısa sürede çok sayıda istek (rate limiting) veya VPN/proxy IP'si,
+- "Browser Integrity Check" (Cloudflare topluluğunda VPN eklentisi, reklam engelleyici,
+  kurumsal proxy ve uygulama içi tarayıcıların bu kuralı tetiklediği bildirildi),
+- JavaScript/çerez çalıştırmayan tarayıcılar (Telegram'ın uygulama içi tarayıcısı dahil).
+
+Bu yüzden Cimri düğmesinin sorgusu **ilk iki kelimeye** indirilir
+(`CIMRI_QUERY_WORDS = 2`): hem URL kısalır, hem aranan dize az özel karakter taşır.
+Google Alışveriş ve Akakçe tam sorguyu kullanmaya devam eder. Engellenirsen bağlantıyı
+Telegram'ın içi tarayıcısı yerine normal tarayıcıda açmak, VPN'i kapatmak veya diğer iki
+düğmeyi kullanmak en pratik çözümdür; engel genelde bir süre sonra kendiliğinden kalkar.
+Engel bizim tarafımızdan kaldırılamaz: kuralı site sahibi yönetir ve yalnızca Ray ID ile
+Cloudflare panelinden (Security → Events) görebilir.
 
 ### Kaynak formatları farklı olsa da sorgu ürün adından üretilir
 
@@ -759,8 +829,8 @@ Ek olarak her iletinin sonuna `🔗 Mesajı Gör: <t.me linki>` eklenir.
 `link_appendix: "smart"` (varsayılan) ürün özetinde zaten gösterilen gizli hyperlink'i
 ikinci kez ek listeye yazmaz; yalnızca başka türlü taşınamayan linkleri ekler. `"all"`
 ürün linki özette olsa bile aynı URL'yi çoğaltmadan diğer gizli linkleri de yazar;
-`"off"` ek bağlantı listesini yazmaz. Ürün linki bulunduğunda sabit üst özetteki
-`Ürün fırsat linki` satırı, bu ek bağlantı ayarından bağımsız olarak korunur.
+`"off"` ek bağlantı listesini yazmaz. Ürün linki bulunduğunda sabit üst bloktaki
+`🔗 <link>` satırı, bu ek bağlantı ayarından bağımsız olarak korunur (link bir kez yazılır).
 
 ---
 
@@ -772,32 +842,37 @@ indirimin "gerçek ve teyitli" olduğunun işaretidir. Bu yüzden tekrar birleş
 açıktır (varsayılan):
 
 - **İlk kopya** her zamanki gibi gönderilir ve başlığı bellekteki listeye yazılır.
-- **Sonraki aynı fırsatın kopyaları gruba ATILMAZ.** Onun yerine ilk mesaja rozet işlenir.
-  Rozet başlık ve fiyatı yerinden oynatmaz; fiyat satırının hemen altına, ürün linkinden
-  önce gelir. Rozet **tek satırdır**: sayı ve "teyitli fırsat" etiketi yeter, kaynak adları tek tek
-  yazılmaz (kullanıcı isteği: 5 kaynak alt alta yazılınca bildirim karışıyordu):
+- **Sonraki aynı fırsatın kopyaları gruba ATILMAZ.** Onun yerine ilk mesajın **en alt
+  bloğuna**, kaynak grup ad(lar)ının altına çoklu paylaşım notu işlenir ve mesaj orada
+  kapanır (kullanıcı isteği: "2-3-4 kere paylaşıldı şu şu şu gruplarda diyerek son
+  bloğa koyup kapatalım"). Not **tek satırdır**; kaç kez paylaşıldığı ve hangi
+  gruplardan geldiği yazılır:
 
 ```text
 Sıcak ÇAY
 
-Fiyat: 5 TL
+💰Fiyat: 5 TL
 
-🔥 3 kaynakta paylaşıldı! · teyitli fırsat
+🔗 https://amzn.to/ornek
 
-🔗 Ürün fırsat linki: https://amzn.to/ornek
+🔗 Mesajı Gör: https://t.me/firsatz/1
 
-Sıcak ÇAY 5 TL
 Kaçırılmayacak fırsat!
-...
+
+firsatz                                   ← kalın kaynak adı (son blok)
+📌 3 kere paylaşıldı: firsatz, İndirimde Al, OnuAl   ← not bu bloğu kapatır
 ```
 
-- Sayı büyüdükçe vurgu artar: `✅ 2 kaynakta...` → `🔥 3 ...` → `🔥🔥 4 ...` →
-  `🚨 5 KAYNAKTA PAYLAŞILDI — KAÇIRMA! 🚨`. Telegram'da mesaj rengine
-  müdahale edilemez; kalın + emoji + büyük harf, platformun sunduğu en güçlü
-  vurgu kombinasyonudur.
-- Eski sürümün ikinci satırdaki `📌 Kaynaklar: ...` listesi artık yazılmaz; daha önce
-  gönderilmiş rozetler okunurken (açılış taraması) o satır yine atlanır, yani geriye
-  dönük uyumluluk korunur.
+- Sayı 5'i geçince vurgu artar: `📌 N kere paylaşıldı: …` → `🚨 N kere paylaşıldı: … —
+  KAÇIRMA!`. Telegram'da mesaj rengine müdahale edilemez; kalın + emoji,
+  platformun sunduğu en güçlü vurgu kombinasyonudur. Çok dar medya açıklamalarında
+  grup adları sığmazsa yalnızca sayı yazılır.
+- Grup adları kaynaklardan toplanır (ilk kopyayı gönderen grup + sonraki kopyaları
+  yakalayan gruplar); aynı grup birden fazla kez paylaşırsa adı bir kez yazılır.
+- **Geriye dönük uyumluluk:** eski `✅ 2 kaynakta paylaşıldı · teyitli fırsat` /
+  `🔥 3 kaynakta ...` / `🚨 N KAYNAKTA PAYLAŞILDI` rozetleri hâlâ tanınır ve sökülür;
+  daha eski sürümün ikinci satırdaki `📌 Kaynaklar: ...` listesi de atlanır. Böylece
+  restart sonrası açılış taraması eski bildirimleri sayar ve not yeni biçimle yazılır.
 - Eşleşme mesajın ilk satırına değil, fiyat/indirim/CTA satırlarını yerel olarak
   ayıklayan ürün başlığı sorgusuna göre yapılır. Harf büyüklüğü, noktalama, kelime sırası
   ve `6.2L` / `6,2 L` gibi sayı biçimi farkları normalize edilir; böylece fiyatı başta
@@ -808,7 +883,7 @@ Kaçırılmayacak fırsat!
 taranmaz, yani bildirim gecikmez ve ileti başına ek API çağrısı yapılmaz
 (FloodWait/429 riski yok). Tek tarama açılışta bir kez yapılır: hedeften son
 `dedup_scan_limit` ileti (varsayılan 100, tek API çağrısı) okunup liste ısıtılır;
-böylece yeniden başlama sonrası aynı normalize ürün sorgusu ikinci kez düşmez. Rozet
+böylece yeniden başlama sonrası aynı normalize ürün sorgusu ikinci kez düşmez. Not
 güncellemesi arka planda yapılır ve aynı sohbetteki düzenleme hız sınırının
 altında kalır. GitHub'a ek istek atılmaz.
 
@@ -929,12 +1004,40 @@ Bu repodaki güncel davranış değişiklikleri:
    Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin).
 7. **Arama düğmeleri artık farklı kaynak formatlarında doğru ürün adını arar.** Fiyat/
    indirim satırları sorgudan ayıklanır; sıralama Google Alışveriş → Akakçe → Cimri'dir.
-   Cimri araması `/arama?sort=price,asc&q=...` URL'sini kullanır. İşlem yereldir, bildirim
-   gecikmesi eklemez; mesaj metnine dokunmaz.
+   Cimri araması `/arama?sort=price,asc&q=...` URL'sini kullanır ve sorguyu ilk iki
+   kelimeyle sınırlar (Cloudflare koruması). İşlem yereldir, bildirim gecikmesi eklemez;
+   mesaj metnine dokunmaz.
 8. **Kaynak erişim smoke testi eklendi.** `/kaynaktest` her çözülmüş kanaldan tek son mesaj
    okuyarak erişimi, üyeliği ve o oturumdaki canlı event sayısını raporlar; tüm arşivi
    indirmez ve kaynaklara test mesajı göndermez.
    Ayrıntı: [4. bölüm](#4-telegram-komutları) ve [8. bölüm](#8-gizli-bağlantılar-ve-fiyat-arama-düğmeleri).
+9. **Bildirim sabit düzene geçti: başlık → `💰Fiyat: …` → `🔗 <ürün linki>` → kalan
+   satırlar → `Mesajı Gör` → kaynak adı.** Başlık, fiyat ve ürün linki kaynak mesajdan
+   alınır ve **alındıkları satırlardan silinir**; biçim gereği alınmayan satırlar
+   altta aynen korunur. Böylece aynı bilgi iki kez
+   görünmez, veri kaybı olmaz. `🔗 Ürün fırsat linki:` etiketi kaldırıldı; link satırı
+   yalnızca ataç + adrestir.
+   Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin).
+10. **Kupon/duyuru istisnası ve fiyat satırı birleşmesi.** Sabit düzen artık yalnızca
+    **ürün başlığı ve fiyat birlikte** varsa kuruluyor; kupon ve duyuru paylaşımları
+    (başlık/fiyat yok) olduğu gibi iletilir. Kupon satırlarındaki tutarlar ve
+    `200 TL üzeri` gibi eşikler fiyat sayılmaz. Fiyatla ilgili ek veri
+    (`🏷️ 33 TL (3 Adet Alımda 22 TL)`) üst fiyat satırına taşınır, altta tekrar etmez.
+    Cimri arama düğmesinin sorgusu ilk iki kelimeye indi (Cloudflare WAF bloğunu azaltmak
+    için). Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin) ve
+    [8. bölüm](#8-gizli-bağlantılar-ve-fiyat-arama-düğmeleri).
+11. **Blok sırası son hâli: fiyat bloğu, altına inen ürün linki ve çoklu paylaşım
+    notu.** Bildirim artık blok blok okunur: başlık → `💰Fiyat` (fiyatla ilgili tüm veri
+    ve `💬/📂/🛍️/🗓️` gibi fiyata bağlı satırlar) → `🔗 <ürün linki>` →
+    `🔗 Mesajı Gör` → bloklara girmeyen satırlar ve gizli linkler → en altta kaynak
+    grup adı. Ürün linki bir **satır değil üçüncü bloktur**: fiyat bloğunun altına
+    iner, "hemen fiyat satırının altında" olmak zorunda değildir. Çoklu paylaşım notu
+    (`📌 N kere paylaşıldı: <gruplar>`) fiyat satırının altına değil, **bu son bloğa**
+    eklenip mesajı kapatır; sayı ve grup adları
+    kaynaklardan toplanır. Eski `✅/🔥/🚨 … kaynakta paylaşıldı` rozetleri okunup
+    yeni biçime taşınır (geriye dönük uyumluluk).
+    Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin) ve
+    [9. bölüm](#9-tekrar-birleştirme-aynı-fırsat-tek-mesaj).
 
 ### 1. PR'ı `main`'e merge et
 
@@ -992,6 +1095,9 @@ yeni bir run başlattığından** emin ol (eski kodda bu özellik yoktur); hâl�
 - [ ] `/ekle` → kategori seç → `a, b, c` gönder → `/kaydet` ile GitHub'a yaz
 - [ ] `/çıkar` → listeyi gösteriyor mu? `1, 3` gibi çoklu çıkarma çalışıyor mu?
 - [ ] `/analiz` → iki istatistik geliyor mu? Kelimeleri harici listeye ekleyebiliyor musun?
+- [ ] Bildirim düzeni: başlık → `💰Fiyat` (fiyatla ilgili tüm veri) → `🔗 link`;
+      başlık/fiyat/link gövdede tekrar etmiyor mu? Kaynakta kalan satır
+      (örn. "365 Günün En Düşük Fiyatı") duruyor mu? Kupon paylaşımı olduğu gibi geliyor mu?
 - [ ] Tek mesaj modu: gruba tek mesaj düşüyor mu (bot bildirimi), kopya siliniyor mu?
 - [ ] Komut temizliği: `/durum` yaz → eski komut/yanıt silindi mi? Bildirimler duruyor mu?
 - [ ] `/iptal` taslağı değiştirmeden siliyor mu?
