@@ -595,31 +595,45 @@ Takipçi **kendi Telegram hesabınla** gönderir; Telegram kendi gönderdiğin m
 bildirim üretmez. Bu yüzden fırsat gruba düşse bile telefonuna uyarı gelmez. Çözüm: gruba
 ikinci bir gönderici olarak küçük bir bot eklemek — bildirimi onun attığı mesaj üretir.
 
-**Bildirim biçimi:** önce ürün özeti, ardından temizlenmiş kaynak mesajı, orijinal
-mesaj bağlantısı ve en altta kalın kaynak adı. Sabit sıra şöyledir:
+**Bildirim biçimi (sabit düzen):** başlık → `💰Fiyat: …` → `🔗 <ürün linki>` →
+kaynaktan **alınmayan** satırlar → `🔗 Mesajı Gör: <t.me linki>` → en altta kalın kaynak
+adı. Başlık, fiyat ve ürün linki kaynak mesajdan **alınır** ve alındıkları satırlardan
+**silinir** (kullanıcı isteği: "benim format için orijinalden veriyi al, aldıklarını da
+aldığın yerden sil"); böylece aynı bilgi bildirimde iki kez görünmez. Biçim gereği
+alınmayan satırlar (örn. `🗓️ 365 Günün En Düşük Fiyatı`) altta aynen korunur:
+**veri kaybı yok**.
 
 ```text
-Philips Airfryer XXL 6.2L
+Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici Banyo ve Duş Jeli 500ml x 4 Adet
 
-Fiyat: 1.299 TL
+💰Fiyat: 225 TL
 
-🔗 Ürün fırsat linki: https://amzn.to/ornek
+🔗 https://link.amazon/B02W5SjPe
 
-1.299 TL
-%50 indirim
-🛍️ Philips Airfryer XXL 6.2L
-Fırsata Git
+🗓️ 365 Günün En Düşük Fiyatı      ← kaynakta alınmayan satır: aynen korunur
 
-🔗 Mesajı Gör: https://t.me/firsatz/31543
+🔗 Mesajı Gör: https://t.me/indirimdeal/50953
 
-FırsatZ          ← kalın, etiketsiz, linksiz
+İndirimde Al 🛒 🛍️ Hepsiburada Trendyol N11   ← kalın, etiketsiz, linksiz
 ```
 
-Çok kaynaklı teyit rozeti varsa **fiyat satırının hemen altına**, ürün fırsat linkinden
-önce eklenir; mesaj başına taşınmaz. Fiyat bulunamazsa `Fiyat: Belirtilmemiş`, ürün
-başlığı veya mağaza linki ayıklanamazsa ilgili özet satırında açıklayıcı yer tutucu gösterilir.
-Özet yerel metin ayıklamasıyla hazırlanır; ağa gidilmediği için bildirimde ekstra gecikme
-yaratmaz. Arama düğmeleri gövdeye karakter eklemeden inline klavyede kalır.
+Kurallar:
+
+- Kaynakta ürün linki yalnızca bir satırın tamamıysa (`🛒 https://…`), bir gizli
+  hyperlink etiketi CTA ise (`Fırsata Git`) ya da bir satır yalnızca fiyat etiketiyse
+  (`💰 Fiyat : 225 TL`) satır tümüyle düşer: bilgi üst blokta zaten vardır.
+- Satırda tüketilen değerden başka **veri** varsa yalnızca alınan değer (ve fiyat
+  etiketi) silinir, kalanı korunur: `💰 Fiyat : 107 TL / 3 adet alımda 64 TL` →
+  `💰Fiyat: 107 TL` (üst blok) + `3 adet alımda 64 TL` (altta).
+- Gizli hyperlink'in görünen etiketi anlamlı bir metinse (ürün ya da kampanya adı gibi)
+  dokunulmaz ve kaynak mesajdaki yazı tıklanabilir kalır.
+- Ürün başlığı veya ne fiyat ne mağaza linki ayıklanamazsa gövde yeniden kurulmaz
+  (biçim yalnızca kurulabildiğinde uygulanır). Fiyat bulunamazsa
+  `💰Fiyat: Belirtilmemiş` yazılır; ürün linki bulunamazsa link satırı hiç yazılmaz.
+- Çok kaynaklı teyit rozeti **fiyat satırının hemen altına**, ürün linkinden önce
+  eklenir; mesaj başına taşınmaz (bkz. 9. bölüm).
+- Özet yerel metin ayıklamasıyla hazırlanır; ağa gidilmediği için bildirimde ekstra
+  gecikme yaratmaz. Arama düğmeleri gövdeye karakter eklemeden inline klavyede kalır.
 
 Bölümler (başlık/fiyat, ürün linki, `Mesajı Gör`, kaynak grup adı) arasında **tam bir
 boş satır** olur; fazlası değil. Reklam/işbirliği etiketi veya WhatsApp bağlantısı
@@ -706,8 +720,8 @@ denenmez; sırayla deneyip ilk başarılı olanı kullanır:
 
 | Gizleme yolu | Örnek | Bot ne yapar |
 |---|---|---|
-| Metin altına gizlenmiş hyperlink | "**Fırsata Git**" yazısı görünür, link altındadır | Ürün/mağaza linkiyse sabit özette gösterilir; kaynak mesajındaki yazı da tıklanabilir kalır |
-| Inline buton | Yazıda link yok, butondadır | Bot bildirimi URL düğmesini korur; ürün linkiyse sabit özetin `Ürün fırsat linki` satırında da görünür |
+| Metin altına gizlenmiş hyperlink | "**Fırsata Git**" yazısı görünür, link altındadır | Ürün/mağaza linkiyse sabit üst bloktaki `🔗 <link>` satırına alınır; CTA etiketi ("Fırsata Git") tüketilir, anlamlı bir etiketse kaynak mesajda tıklanabilir kalır |
+| Inline buton | Yazıda link yok, butondadır | Bot bildirimi URL düğmesini korur; ürün linkiyse sabit üst bloktaki `🔗 <link>` satırında da görünür |
 | Link önizlemesi | Metinde link yok, önizleme kartı var | Ürün/mağaza hedefi ürün özetine; diğer hedefler ek link listesine girer |
 
 Bildirim botu, kaynakta aynı arama hizmetine ait bir URL/buton yoksa eksik düğmeleri şu
@@ -759,8 +773,8 @@ Ek olarak her iletinin sonuna `🔗 Mesajı Gör: <t.me linki>` eklenir.
 `link_appendix: "smart"` (varsayılan) ürün özetinde zaten gösterilen gizli hyperlink'i
 ikinci kez ek listeye yazmaz; yalnızca başka türlü taşınamayan linkleri ekler. `"all"`
 ürün linki özette olsa bile aynı URL'yi çoğaltmadan diğer gizli linkleri de yazar;
-`"off"` ek bağlantı listesini yazmaz. Ürün linki bulunduğunda sabit üst özetteki
-`Ürün fırsat linki` satırı, bu ek bağlantı ayarından bağımsız olarak korunur.
+`"off"` ek bağlantı listesini yazmaz. Ürün linki bulunduğunda sabit üst bloktaki
+`🔗 <link>` satırı, bu ek bağlantı ayarından bağımsız olarak korunur (link bir kez yazılır).
 
 ---
 
@@ -780,13 +794,12 @@ açıktır (varsayılan):
 ```text
 Sıcak ÇAY
 
-Fiyat: 5 TL
+💰Fiyat: 5 TL
 
 🔥 3 kaynakta paylaşıldı! · teyitli fırsat
 
-🔗 Ürün fırsat linki: https://amzn.to/ornek
+🔗 https://amzn.to/ornek
 
-Sıcak ÇAY 5 TL
 Kaçırılmayacak fırsat!
 ...
 ```
@@ -935,6 +948,13 @@ Bu repodaki güncel davranış değişiklikleri:
    okuyarak erişimi, üyeliği ve o oturumdaki canlı event sayısını raporlar; tüm arşivi
    indirmez ve kaynaklara test mesajı göndermez.
    Ayrıntı: [4. bölüm](#4-telegram-komutları) ve [8. bölüm](#8-gizli-bağlantılar-ve-fiyat-arama-düğmeleri).
+9. **Bildirim sabit düzene geçti: başlık → `💰Fiyat: …` → `🔗 <ürün linki>` → kalan
+   satırlar → `Mesajı Gör` → kaynak adı.** Başlık, fiyat ve ürün linki kaynak mesajdan
+   alınır ve **alındıkları satırlardan silinir**; biçim gereği alınmayan satırlar
+   (örn. `🗓️ 365 Günün En Düşük Fiyatı`) altta aynen korunur. Böylece aynı bilgi iki kez
+   görünmez, veri kaybı olmaz. `🔗 Ürün fırsat linki:` etiketi kaldırıldı; link satırı
+   yalnızca ataç + adrestir. Teyit rozeti yine fiyat satırının hemen altına işlenir.
+   Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin).
 
 ### 1. PR'ı `main`'e merge et
 
@@ -992,6 +1012,8 @@ yeni bir run başlattığından** emin ol (eski kodda bu özellik yoktur); hâl�
 - [ ] `/ekle` → kategori seç → `a, b, c` gönder → `/kaydet` ile GitHub'a yaz
 - [ ] `/çıkar` → listeyi gösteriyor mu? `1, 3` gibi çoklu çıkarma çalışıyor mu?
 - [ ] `/analiz` → iki istatistik geliyor mu? Kelimeleri harici listeye ekleyebiliyor musun?
+- [ ] Bildirim düzeni: başlık → `💰Fiyat` → `🔗 link`; başlık/fiyat/link gövdede
+      tekrar etmiyor mu? Kaynakta kalan satır (örn. "365 Günün En Düşük Fiyatı") duruyor mu?
 - [ ] Tek mesaj modu: gruba tek mesaj düşüyor mu (bot bildirimi), kopya siliniyor mu?
 - [ ] Komut temizliği: `/durum` yaz → eski komut/yanıt silindi mi? Bildirimler duruyor mu?
 - [ ] `/iptal` taslağı değiştirmeden siliyor mu?
