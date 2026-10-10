@@ -596,14 +596,16 @@ Takipçi **kendi Telegram hesabınla** gönderir; Telegram kendi gönderdiğin m
 bildirim üretmez. Bu yüzden fırsat gruba düşse bile telefonuna uyarı gelmez. Çözüm: gruba
 ikinci bir gönderici olarak küçük bir bot eklemek — bildirimi onun attığı mesaj üretir.
 
-**Bildirim biçimi (sabit düzen):** başlık → `💰Fiyat: …` (fiyatla ilgili tüm veri) →
-`🔗 <ürün linki>` → `🔗 Mesajı Gör: <t.me linki>` → kaynaktan **alınmayan** satırlar ve
-gizli linkler → en altta kalın kaynak adı; çoklu paylaşım notu bu son bloğu kapatır.
-Başlık, fiyat ve ürün linki kaynak mesajdan **alınır** ve alındıkları satırlardan
-**silinir** (kullanıcı isteği: "benim format için orijinalden veriyi al, aldıklarını da
-aldığın yerden sil"); böylece aynı bilgi bildirimde iki kez görünmez. Biçim gereği
-alınmayan satırlar (örn. `🗓️ 365 Günün En Düşük Fiyatı`) altta aynen korunur:
-**veri kaybı yok**.
+**Bildirim biçimi (sabit düzen):** başlık → `💰Fiyat: …` (fiyat satırındaki tüm veri +
+fiyata bağlı kart satırları) → `🔗 <ürün linki>` (fiyat bloğunun **altına** inen 3. blok;
+satır olarak hemen altında olmak zorunda değil) → `🔗 Mesajı Gör: <t.me linki>` →
+kaynaktan **alınmayan** satırlar ve gizli linkler → en altta kalın kaynak adı; çoklu
+paylaşım notu bu son bloğu kapatır. Başlık, fiyat ve ürün linki kaynak mesajdan
+**alınır** ve alındıkları satırlardan **silinir** (kullanıcı isteği: "benim format için
+orijinalden veriyi al, aldıklarını da aldığın yerden sil"); böylece aynı bilgi bildirimde
+iki kez görünmez. Fiyata bağlı satırlar (`💬 Ortalama fiyatın %31 altında`,
+`📂 Süpermarket`, `🛍️ Amazon`, `🗓️ 365 Günün En Düşük Fiyatı`) fiyat bloğuna girer;
+başka satırlar gövdede aynen korunur: **veri kaybı yok**.
 
 **İstisna — ürün değil, duyuru:** biçim yalnızca **ürün başlığı ve fiyat birlikte**
 bulunduğunda kurulur. Kupon/duyuru paylaşımlarında (örn.
@@ -627,11 +629,11 @@ Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici Banyo ve Du
 
 💰Fiyat: 225 TL
 
+🗓️ 365 Günün En Düşük Fiyatı      ← fiyata bağlı satır: fiyat bloğunda, linkin ÜSTÜNDE
+
 🔗 https://link.amazon/B02W5SjPe
 
 🔗 Mesajı Gör: https://t.me/indirimdeal/50953
-
-🗓️ 365 Günün En Düşük Fiyatı      ← kaynakta alınmayan satır: aynen korunur
 
 İndirimde Al 🛒 🛍️ Hepsiburada Trendyol N11        ← kalın, etiketsiz, linksiz (son blok)
 📌 2 kere paylaşıldı: İndirimde Al, FırsatZ   ← çoklu paylaşım notu bu bloğu kapatır
@@ -650,6 +652,13 @@ Kurallar:
   fiyat tüketilir, kalanı gövdede kalır: `129,90 TL Stoklarla sınırlı` →
   `💰Fiyat: 129,90 TL` + gövdede `Stoklarla sınırlı`. Satırda URL varsa satır bütün
   olarak silinmez, link kaybolmaz.
+- Fiyat satırıyla ürün linki arasında duran **fiyata bağlı** satırlar fiyat bloğuna
+  girer ve ürün linkinin **üstünde** görünür (ürün linki bir satır değil, 3. bloktur:
+  fiyat bloğunun altına iner). Fiyata bağlı sayılma ölçütü: satır emoji/işaretle
+  başlıyor (`💬 Ortalama fiyatın %31 altında`, `📂 Süpermarket`, `🛍️ Amazon`,
+  `🗓️ 365 Günün En Düşük Fiyatı`) ya da yüzde/indirim ifadesi taşıyor (`%50 indirim`).
+  Düz metin satırları (örn. `Kaçırılmayacak fırsat!`) fiyat bloğuna girmez, gövdede
+  kalır; alınan satırlar tekrar yazılmaz.
 - Gizli hyperlink'in görünen etiketi anlamlı bir metinse (ürün ya da kampanya adı gibi)
   dokunulmaz ve kaynak mesajdaki yazı tıklanabilir kalır.
 - Ürün başlığı **veya** fiyat ayıklanamazsa gövde yeniden kurulmaz: mesaj olduğu gibi
@@ -662,7 +671,9 @@ Kurallar:
   gecikme yaratmaz. Arama düğmeleri gövdeye karakter eklemeden inline klavyede kalır.
 
 Bölümler (başlık/fiyat, ürün linki, `Mesajı Gör`, kaynak grup adı) arasında **tam bir
-boş satır** olur; fazlası değil. Reklam/işbirliği etiketi veya WhatsApp bağlantısı
+boş satır** olur; fazlası değil. Fiyat bloğuna giren kart satırları fiyat satırının
+hemen altında tek satır aralığıyla durur (kendi bloğu içinde boş satır olmaz).
+Reklam/işbirliği etiketi veya WhatsApp bağlantısı
 silinince geriye kalan çoklu boş satırlar otomatik olarak tek boş satıra indirilir,
 baş/sondaki boş satırlar atılır. Bu sıkıştırma **yalnızca** boşluk, tab, `\r` ve satır
 sonu karakterlerini alır — metin içeriği, emojiler ve entity offset'leri korunur, veri
@@ -1003,7 +1014,7 @@ Bu repodaki güncel davranış değişiklikleri:
 9. **Bildirim sabit düzene geçti: başlık → `💰Fiyat: …` → `🔗 <ürün linki>` → kalan
    satırlar → `Mesajı Gör` → kaynak adı.** Başlık, fiyat ve ürün linki kaynak mesajdan
    alınır ve **alındıkları satırlardan silinir**; biçim gereği alınmayan satırlar
-   (örn. `🗓️ 365 Günün En Düşük Fiyatı`) altta aynen korunur. Böylece aynı bilgi iki kez
+   altta aynen korunur. Böylece aynı bilgi iki kez
    görünmez, veri kaybı olmaz. `🔗 Ürün fırsat linki:` etiketi kaldırıldı; link satırı
    yalnızca ataç + adrestir.
    Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin).
@@ -1015,11 +1026,14 @@ Bu repodaki güncel davranış değişiklikleri:
     Cimri arama düğmesinin sorgusu ilk iki kelimeye indi (Cloudflare WAF bloğunu azaltmak
     için). Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin) ve
     [8. bölüm](#8-gizli-bağlantılar-ve-fiyat-arama-düğmeleri).
-11. **Blok sırası son hâli ve çoklu paylaşım notu son bloğa taşındı.** Bildirim sırası
-    artık başlık → `💰Fiyat` (fiyatla ilgili tüm veri) → `🔗 <ürün linki>` →
+11. **Blok sırası son hâli: fiyat bloğu, altına inen ürün linki ve çoklu paylaşım
+    notu.** Bildirim artık blok blok okunur: başlık → `💰Fiyat` (fiyatla ilgili tüm veri
+    ve `💬/📂/🛍️/🗓️` gibi fiyata bağlı satırlar) → `🔗 <ürün linki>` →
     `🔗 Mesajı Gör` → bloklara girmeyen satırlar ve gizli linkler → en altta kaynak
-    grup adı. Çoklu paylaşım notu (`📌 N kere paylaşıldı: <gruplar>`) fiyat satırının
-    altına değil, **bu son bloğa** eklenip mesajı kapatır; sayı ve grup adları
+    grup adı. Ürün linki bir **satır değil üçüncü bloktur**: fiyat bloğunun altına
+    iner, "hemen fiyat satırının altında" olmak zorunda değildir. Çoklu paylaşım notu
+    (`📌 N kere paylaşıldı: <gruplar>`) fiyat satırının altına değil, **bu son bloğa**
+    eklenip mesajı kapatır; sayı ve grup adları
     kaynaklardan toplanır. Eski `✅/🔥/🚨 … kaynakta paylaşıldı` rozetleri okunup
     yeni biçime taşınır (geriye dönük uyumluluk).
     Ayrıntı: [6. bölüm](#6-bildirim-kurulumu-telefona-uyarı-gelsin) ve

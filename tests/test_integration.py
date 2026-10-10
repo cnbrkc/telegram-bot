@@ -1213,9 +1213,9 @@ class NotificationTest(unittest.TestCase):
             "Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici "
             "Banyo ve Duş Jeli 500ml x 4 Adet"
             "\n\n💰Fiyat: 225 TL"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
             "\n\n🔗 https://link.amazon/B02W5SjPe"
             "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
-            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
             "\n\nfirsatz"
         ))
         delivered = self.calls[0]["text"]
@@ -1242,11 +1242,11 @@ class NotificationTest(unittest.TestCase):
         self.assertEqual(delivered, (
             "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
             "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+            "\n\n💬 Ortalama fiyatın %31 altında"
+            "\n📂 Süpermarket"
+            "\n🛍️ Amazon"
             "\n\n🔗 https://onu.al/feMF"
             "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
-            "\n\n💬 Ortalama fiyatın %31 altında"
-            "\n\n📂 Süpermarket"
-            "\n\n🛍️ Amazon"
             "\n\nfirsatz"
         ))
         self.assertNotIn("🏷️", delivered, "fiyat etiketi tüketilir")

@@ -2092,6 +2092,65 @@ def _price_row(source: str, price: str) -> tuple[str, tuple[int, int] | None]:
     return row or text, (line_start, line_end)
 
 
+# Fiyat bloğuna katılan "kart bilgisi" satırları: kaynak şablonlarda fiyat
+# satırının altında duran indirim/oran/kategori/mağaza bilgileri
+# (``💬 Ortalama fiyatın %31 altında``, ``📂 Süpermarket``, ``🛍️ Amazon``,
+# ``🗓️ 365 Günün En Düşük Fiyatı``). Kullanıcı isteği: "fiyat ve ona bağlı
+# şeyler blok olarak ikinci blokta"; ürün linki bu bloğun altına iner.
+_CARD_LINE_START_RE = re.compile(r"[^\w\s]")
+_PRICE_INFO_RE = re.compile(
+    r"%\s*\d|düşük|indirim|tasarruf|kazanç|ortalama", re.IGNORECASE,
+)
+
+
+def _price_card_lines(
+    source: str,
+    price_span: tuple[int, int] | None,
+    link_span: tuple[int, int] | None,
+    excluded: Sequence[tuple[int, int]] = (),
+) -> tuple[str, list[tuple[int, int]]]:
+    """Fiyat satırının altında duran fiyata bağlı satırları ver.
+
+    Fiyat satırından sonra, ürün linkine kadar duran fiyatla ilgili satırlar
+    fiyat bloğuna girer; ürün linki **bu bloğun altına** iner (kullanıcı
+    isteği: "sıra derken üçüncü blok dedim... bunlar fiyata bağlı bir blok,
+    dolayısıyla linkin üstünde olacak"). Fiyatla ilgili sayılma ölçütü: satır
+    emoji/işaretle başlıyor (``📂 Süpermarket``) ya da yüzde/indirim ifadesi
+    taşıyor (``%50 indirim``). Düz metin satırları (``Kaçırılmayacak fırsat!``)
+    gövdede kalır; veri kaybı olmaz. ``excluded`` aralıklarına (başlık satırı)
+    denk gelen satırlar alınmaz.
+    """
+    if not price_span:
+        return "", []
+    zone_start = source.find("\n", price_span[1])
+    if zone_start < 0:
+        return "", []  # fiyat son satırda: altında kart bilgisi yok
+    zone_start += 1
+    zone_end = len(source)
+    if link_span:
+        link_line = source.rfind("\n", 0, link_span[0]) + 1
+        if link_line <= zone_start:
+            return "", []  # link fiyat satırının üstünde/aynı satırda: sıra değişmez
+        zone_end = link_line
+    lifted: list[str] = []
+    spans: list[tuple[int, int]] = []
+    offset = zone_start
+    for raw_line in source[zone_start:zone_end].splitlines(keepends=True):
+        content = raw_line.rstrip("\r\n")
+        span = (offset, offset + len(content))
+        offset += len(raw_line)
+        stripped = content.strip()
+        if not stripped or URL_RE.search(content):
+            continue
+        if _spans_overlap(span, excluded):
+            continue
+        if not (_CARD_LINE_START_RE.match(stripped) or _PRICE_INFO_RE.search(stripped)):
+            continue
+        lifted.append(stripped)
+        spans.append(span)
+    return "\n".join(lifted), spans
+
+
 def _consume_offer_source(
     obj: Any,
     text: str,
@@ -2100,6 +2159,7 @@ def _consume_offer_source(
     price: str | None,
     product_link: str | None,
     price_span: tuple[int, int] | None = None,
+    extra_spans: Sequence[tuple[int, int]] = (),
 ) -> tuple[str, list[tuple[str, str, list[tuple[int, int]]]]]:
     """Başlık/fiyat/ürün linkini kaynak metinden çıkar.
 
@@ -2108,8 +2168,11 @@ def _consume_offer_source(
     fiyatın üste alındığı aralıktır; etiketli bir fiyat satırıysa (``🏷️ 33 TL
     (3 Adet Alımda 22 TL)``) satırın tamamı üste taşındığı için tümü silinir.
     URL'lerin içine denk gelen fiyat/başlık parçaları silinmez (adres
-    bozulmasın). Dönen adımlar ``(önce, sonra, silinen_aralıklar)``
-    üçlüleridir; entity offset'leri bu adımlardan sırayla geçirilir.
+    bozulmasın). ``extra_spans`` fiyat bloğuna taşınan kart bilgisi
+    satırlarının aralıklarıdır; üstte gösterildikleri için gövdeden silinirler
+    (bkz. ``_price_card_lines``). Dönen adımlar ``(önce, sonra,
+    silinen_aralıklar)`` üçlüleridir; entity offset'leri bu adımlardan sırayla
+    geçirilir.
     """
     source = text or ""
     url_spans = _merge_spans(
@@ -2130,6 +2193,8 @@ def _consume_offer_source(
         span for span in _title_spans(source, title)
         if not _spans_overlap(span, url_spans)
     )
+    # Fiyat bloğuna taşınan kart satırları (``💬``/``📂``/``🗓️`` ...) gövdeden düşer.
+    spans.extend(extra_spans)
     spans = _merge_spans(spans)
     if not spans:
         return source, []
@@ -2207,8 +2272,12 @@ def compose_message(
 
     1. ürün adı/başlık,
     2. ``💰Fiyat: <fiyat>``; fiyat satırında ek veri varsa (``🏷️ 33 TL (3 Adet
-       Alımda 22 TL)``) hepsi bu satıra taşınır (bkz. ``_price_row``),
-    3. ``🔗 <ürün linki>`` (fiyat bloğunun hemen altında),
+       Alımda 22 TL)``) hepsi bu satıra taşınır (bkz. ``_price_row``) ve
+       fiyata bağlı kart bilgileri (``💬 … %31 altında``, ``📂 Süpermarket``,
+       ``🗓️ 365 Günün En Düşük Fiyatı``) aynı bloğa girer
+       (bkz. ``_price_card_lines``),
+    3. ``🔗 <ürün linki>`` — **üçüncü blok**: fiyat bloğunun (fiyat + ona
+       bağlı satırlar) altına iner, satır olarak hemen altında olması gerekmez,
     4. ``🔗 Mesajı Gör: <t.me linki>``,
     5. bloklara giremeyen kaynak satırları ve taşınamayan gizli linkler,
     6. en alt blok: kaynak grup adı — çoklu paylaşım notu bu bloğu kapatır
@@ -2246,17 +2315,31 @@ def compose_message(
         # Fiyat bloğu (2. sıra): fiyatın kendisi VE fiyat satırında yazılı ek
         # veri (``🏷️ 33 TL (3 Adet Alımda 22 TL)`` → hepsi üstte görünür).
         price_text, price_span = _price_row(source_body, price or "")
+        # Fiyata bağlı kart bilgileri (``💬 … %31 altında``, ``📂 Süpermarket``,
+        # ``🗓️ 365 Günün En Düşük Fiyatı``) fiyat bloğuna girer; ürün linki
+        # (3. blok) bu bloğun altına iner (kullanıcı isteği: "bunlar fiyata
+        # bağlı bir blok, dolayısıyla linkin üstünde olacak").
+        link_span = None
+        if product_link:
+            link_span = _visible_link_span(source_body, product_link) \
+                or _hidden_link_span(cleaned_obj, source_body, product_link)
+        card_text, card_spans = _price_card_lines(
+            source_body, price_span, link_span,
+            excluded=_title_spans(source_body, product_title),
+        )
         header = [
             product_title,
             f"{MONEY_EMOJI}{PRICE_LINE_LABEL} {price_text}",
         ]
+        if card_text:
+            header.append(card_text)
         if product_link:
             header.append(f"{PRODUCT_LINK_PREFIX} {product_link}")
         summary = "\n\n".join(header)
         body, steps = _consume_offer_source(
             cleaned_obj, source_body,
             title=product_title, price=price, product_link=product_link,
-            price_span=price_span,
+            price_span=price_span, extra_spans=card_spans,
         )
         body_entities = _remap_through_steps(body_entities, steps)
 
@@ -4468,11 +4551,12 @@ async def main(argv: Sequence[str] | None = None) -> int:
         log.info("Her iletinin sonuna '🔗 %s: <t.me mesaj linki>' satırı eklenecek.", MESSAGE_LINK_LABEL)
     if NOTIFY_BOT_TOKEN:
         log.info("Bildirim biçimi (sabit düzen): başlık → '%s%s <fiyat>' (fiyat satırındaki tüm "
-                 "veri) → '%s <ürün linki>' → '🔗 %s: <t.me linki>' → kaynakta alınmayan "
-                 "satırlar + gizli linkler → en altta kalın kaynak adı%s (çoklu paylaşım notu "
-                 "bu son bloğu kapatır). Alınan başlık/fiyat/link satırları gövdeden silinir, "
-                 "veri kaybı olmaz; kupon/duyuru paylaşımları başlık/fiyat bulunmadığı için "
-                 "olduğu gibi iletilir.",
+                 "veri + fiyata bağlı satırlar) → '%s <ürün linki>' (fiyat bloğunun altına "
+                 "inen 3. blok) → '🔗 %s: <t.me linki>' → kaynakta alınmayan satırlar + gizli "
+                 "linkler → en altta kalın kaynak adı%s (çoklu paylaşım notu bu son bloğu "
+                 "kapatır). Alınan başlık/fiyat/link satırları gövdeden silinir, veri kaybı "
+                 "olmaz; kupon/duyuru paylaşımları başlık/fiyat bulunmadığı için olduğu gibi "
+                 "iletilir.",
                  MONEY_EMOJI, PRICE_LINE_LABEL, PRODUCT_LINK_PREFIX, MESSAGE_LINK_LABEL,
                  " + medya" if NOTIFY_MEDIA else "")
     if CLEAN_COMMANDS:

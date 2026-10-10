@@ -1848,7 +1848,7 @@ class NoteCommandMessagesTest(unittest.TestCase):
 
 class ComposeMessageTest(unittest.TestCase):
     def test_fixed_header_takes_title_price_and_link_from_the_source(self):
-        """Sabit düzen: başlık → 💰 fiyat → 🔗 link; alınan satırlar gövdeden SİLİNİR."""
+        """Sabit düzen: başlık → 💰 fiyat bloğu → 🔗 link; alınan satırlar gövdeden SİLİNİR."""
         text = "1.299 TL\n%50 indirim\n🛍️ Philips Airfryer XXL 6.2L\nFırsata Git"
         label = "Fırsata Git"
         entity = tl_types.MessageEntityTextUrl(
@@ -1865,9 +1865,9 @@ class ComposeMessageTest(unittest.TestCase):
         self.assertEqual(composed["text"], (
             "Philips Airfryer XXL 6.2L"
             "\n\n💰Fiyat: 1.299 TL"
+            "\n\n%50 indirim"
             "\n\n🔗 https://amzn.to/5"
             "\n\n🔗 Mesajı Gör: https://t.me/firsatz/9"
-            "\n\n%50 indirim"
             "\n\nFırsatZ"
         ))
         first_entity = composed["entities"][0]
@@ -1878,8 +1878,14 @@ class ComposeMessageTest(unittest.TestCase):
         self.assertNotIn("Fırsata Git", composed["text"],
                          "tüketilen gizli link etiketi gövdede tekrar etmemeli")
         self.assertNotIn("🛍️ Philips", composed["text"], "alınan başlık satırı silinmeli")
-        self.assertEqual(composed["body"], "%50 indirim",
-                         "biçim gereği alınmayan satır (indirim oranı) altta korunmalı")
+        self.assertEqual(composed["body"], "",
+                         "fiyata bağlı satır (indirim oranı) fiyat bloğuna girer")
+        self.assertLess(
+            composed["text"].index("%50 indirim"),
+            composed["text"].index("🔗 https://amzn.to/5"),
+            "fiyata bağlı satır ürün linkinin ÜSTÜNDE durur (fiyat bloğu)",
+        )
+        self.assertEqual(composed["text"].count("indirim"), 1)
         self.assertNotIn("Fırsatı Gönderen", composed["text"])
         self.assertEqual(bot.source_name_entity(composed)[0]["type"], "bold")
 
@@ -1917,11 +1923,18 @@ class ComposeMessageTest(unittest.TestCase):
             "Palmolive Moments Lavanta Yağları ve Böğürtlen ile Nemlendirici "
             "Banyo ve Duş Jeli 500ml x 4 Adet"
             "\n\n💰Fiyat: 225 TL"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
             "\n\n🔗 https://link.amazon/B02W5SjPe"
             "\n\n🔗 Mesajı Gör: https://t.me/indirimdeal/50953"
-            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
             "\n\nİndirimde Al 🛒 🛍️ Hepsiburada Trendyol N11"
         ))
+        self.assertLess(
+            composed["text"].index("🗓️ 365 Günün En Düşük Fiyatı"),
+            composed["text"].index("🔗 https://link.amazon/B02W5SjPe"),
+            "fiyatla ilgili satır ürün linkinin üstünde kalır",
+        )
+        self.assertEqual(composed["body"], "",
+                         "fiyat bloğuna giren satır gövdede tekrar etmez")
         self.assertNotIn("Ürün fırsat linki", composed["text"],
                          "ataç + link yeter; etiket yazılmaz")
         self.assertNotIn("💰 Fiyat : 225", composed["text"],
@@ -1998,15 +2011,57 @@ class ComposeMessageTest(unittest.TestCase):
         self.assertEqual(composed["text"], (
             "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
             "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
-            "\n\n🔗 https://onu.al/feMF"
-            "\n\n🔗 Mesajı Gör: https://t.me/onual_ekstra/133797"
             "\n\n💬 Ortalama fiyatın %31 altında"
             "\n📂 Süpermarket"
             "\n🛍️ Amazon"
+            "\n\n🔗 https://onu.al/feMF"
+            "\n\n🔗 Mesajı Gör: https://t.me/onual_ekstra/133797"
             "\n\nOnuAl: Ekstra"
         ))
+        self.assertLess(
+            composed["text"].index("🛍️ Amazon"),
+            composed["text"].index("🔗 https://onu.al/feMF"),
+            "fiyata bağlı kart satırları ürün linkinin ÜSTÜNDE durur",
+        )
         self.assertNotIn("🏷️", composed["text"], "fiyat etiketi tüketilir")
         self.assertEqual(composed["body"].count("33 TL"), 0, "fiyat gövdede tekrar etmez")
+
+    def test_plain_line_between_price_and_link_stays_in_the_body(self):
+        """Fiyata bağlı olmayan düz satır fiyat bloğuna girmez; gövdede korunur."""
+        text = (
+            "🛍️ Çay Makinesi 1.5L\n"
+            "1.299 TL\n"
+            "Kaçırılmayacak fırsat!\n"
+            "🔗 https://amzn.to/9"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://amzn.to/9"),
+            message_link="https://t.me/firsatz/9",
+        )
+        self.assertEqual(composed["text"], (
+            "Çay Makinesi 1.5L"
+            "\n\n💰Fiyat: 1.299 TL"
+            "\n\n🔗 https://amzn.to/9"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/9"
+            "\n\nKaçırılmayacak fırsat!"
+        ))
+        self.assertEqual(composed["body"], "Kaçırılmayacak fırsat!")
+
+    def test_price_bound_lines_rise_above_the_product_link_without_a_link_line(self):
+        """Link metinde satır olarak yoksa da (önizleme/buton) fiyata bağlı satırlar üste girer."""
+        text = "🛍️ Çay Makinesi 1.5L\n1.299 TL\n🗓️ 365 Günün En Düşük Fiyatı"
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://amzn.to/9"),
+            message_link="https://t.me/firsatz/9",
+        )
+        self.assertEqual(composed["text"], (
+            "Çay Makinesi 1.5L"
+            "\n\n💰Fiyat: 1.299 TL"
+            "\n\n🗓️ 365 Günün En Düşük Fiyatı"
+            "\n\n🔗 https://amzn.to/9"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/9"
+        ))
+        self.assertEqual(composed["body"], "")
 
     def test_price_line_with_extra_info_moves_the_rest_into_the_price_row(self):
         """'107 TL / 3 adet alımda 64 TL' → fiyatla ilgili TÜM veri üst fiyat satırına girer."""
