@@ -1559,15 +1559,18 @@ class MessageSanitizationTest(unittest.TestCase):
         )
         self.assertNotIn("%F0%9F", buttons["Google Alışveriş"], "emoji sorguya girmemeli")
 
-    def test_cimri_search_url_uses_verified_search_route_and_price_sort(self):
+    def test_cimri_search_url_uses_verified_route_short_query_and_price_sort(self):
+        """Cimri Cloudflare korumalı: sorgu ilk iki kelimeye iner (WAF bloğunu azaltır)."""
         self.assertEqual(
             bot._price_search_url("cimri", "Arzum AR5106 Volume Pro"),
-            "https://www.cimri.com/arama?sort=price,asc&q=Arzum+AR5106+Volume+Pro",
+            "https://www.cimri.com/arama?sort=price,asc&q=Arzum+AR5106",
         )
         self.assertEqual(
             bot._price_search_url("cimri", "  Çamaşır   Deterjanı / 2 Lt "),
-            "https://www.cimri.com/arama?sort=price,asc&q=%C3%87ama%C5%9F%C4%B1r+Deterjan%C4%B1+%2F+2+Lt",
+            "https://www.cimri.com/arama?sort=price,asc&q=%C3%87ama%C5%9F%C4%B1r+Deterjan%C4%B1",
         )
+        self.assertEqual(bot._cimri_search_query("Sıcak ÇAY"), "Sıcak ÇAY")
+        self.assertEqual(bot._cimri_search_query("Philips Airfryer XXL 6.2L"), "Philips Airfryer")
 
     def test_akakce_and_google_search_urls_remain_stable(self):
         self.assertEqual(
@@ -1925,22 +1928,74 @@ class ComposeMessageTest(unittest.TestCase):
                          "alınan fiyat satırı gövdede kalmaz")
 
     def test_price_inside_a_url_is_not_treated_as_the_offer_price(self):
-        """Adres içindeki ``…/1299-TL-deal`` fiyat sanılmaz, adres bozulmaz."""
-        text = "https://shop.example/1299-TL-deal\n🛍️ Çay Makinesi 1.5L\nKampanya"
+        """Adres içindeki ``…/1299-TL-deal`` fiyat sanılmaz; gerçek fiyat seçilir."""
+        text = "https://shop.example/1299-TL-deal\n🛍️ Çay Makinesi 1.5L\nFiyat: 1.299 TL"
         message = make_message(text, media=False)
-        self.assertIsNone(bot.extract_offer_price(message))
+        self.assertEqual(bot.extract_offer_price(message), "1.299 TL")
         composed = bot.compose_message(message)
         self.assertEqual(composed["text"], (
             "Çay Makinesi 1.5L"
-            "\n\n💰Fiyat: Belirtilmemiş"
+            "\n\n💰Fiyat: 1.299 TL"
             "\n\n🔗 https://shop.example/1299-TL-deal"
-            "\n\nKampanya"
         ))
         self.assertEqual(composed["text"].count("https://shop.example/1299-TL-deal"), 1,
                          "adres bozulmadan bir kez yazılmalı")
 
-    def test_price_line_with_extra_info_keeps_the_rest_of_the_line(self):
-        """'107 TL / 3 adet alımda 64 TL' → fiyat üstte, 3'lü fiyat bilgisi altta (veri kaybı yok)."""
+    def test_coupon_message_is_forwarded_as_is(self):
+        """Kupon/duyuru: ürün başlığı ve fiyat yok → biçim kurulmaz, mesaj olduğu gibi gider."""
+        text = (
+            "🎟️ Hopi 200 TL ve üzeri alışverişlerde 50 TL indirim kuponu\n\n"
+            "Kod: HOPI50\n\n"
+            "Son kullanım: 31 Ekim"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False),
+            message_link="https://t.me/firsatz/7",
+        )
+        self.assertEqual(composed["summary"], "", "kupon paylaşımında sabit düzen kurulmaz")
+        self.assertEqual(composed["body"], text, "kupon metni aynen korunur")
+        self.assertEqual(composed["text"], (
+            text + "\n\n🔗 Mesajı Gör: https://t.me/firsatz/7"
+        ))
+        self.assertNotIn(bot.PRICE_LINE_LABEL, composed["text"])
+
+    def test_price_threshold_sentence_is_not_an_offer_price(self):
+        """'200 TL üzeri kargo bedava' fiyat değildir; bildirim olduğu gibi kalır."""
+        text = "🛍️ Philips Airfryer XXL\nKargo 200 TL üzeri ücretsiz"
+        composed = bot.compose_message(make_message(text, media=False))
+        self.assertIsNone(bot.extract_offer_price(make_message(text, media=False)))
+        self.assertEqual(composed["text"], "🛍️ Philips Airfryer XXL\nKargo 200 TL üzeri ücretsiz")
+
+    def test_labeled_price_line_moves_conditional_price_into_the_price_row(self):
+        """Kullanıcı örneği: ``🏷️ 33 TL (3 Adet Alımda 22 TL)`` → üst fiyat satırı."""
+        text = (
+            "Abc Deterjan Çamaşır Sodası (Soda Matik) 500 Gr\n"
+            "🏷️ 33 TL (3 Adet Alımda 22 TL)\n"
+            "💬 Ortalama fiyatın %31 altında\n"
+            "📂 Süpermarket\n"
+            "🛍️ Amazon\n"
+            "🔗 https://onu.al/feMF"
+        )
+        composed = bot.compose_message(
+            make_message(text, media=False, webpage="https://onu.al/feMF"),
+            message_link="https://t.me/onual_ekstra/133797",
+            source_name="OnuAl: Ekstra",
+        )
+        self.assertEqual(composed["text"], (
+            "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
+            "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+            "\n\n🔗 https://onu.al/feMF"
+            "\n\n💬 Ortalama fiyatın %31 altında"
+            "\n📂 Süpermarket"
+            "\n🛍️ Amazon"
+            "\n\n🔗 Mesajı Gör: https://t.me/onual_ekstra/133797"
+            "\n\nOnuAl: Ekstra"
+        ))
+        self.assertNotIn("🏷️", composed["text"], "fiyat etiketi tüketilir")
+        self.assertEqual(composed["body"].count("33 TL"), 0, "fiyat gövdede tekrar etmez")
+
+    def test_price_line_with_extra_info_moves_the_rest_into_the_price_row(self):
+        """'107 TL / 3 adet alımda 64 TL' → fiyatla ilgili TÜM veri üst fiyat satırına girer."""
         text = (
             "🛍️ Urban Care Duş Jeli 500 Ml\n\n"
             "💰 Fiyat : 107 TL / 3 adet alımda 64 TL\n\n"
@@ -1949,10 +2004,19 @@ class ComposeMessageTest(unittest.TestCase):
         composed = bot.compose_message(make_message(text, media=False))
         self.assertEqual(composed["text"], (
             "Urban Care Duş Jeli 500 Ml"
-            "\n\n💰Fiyat: 107 TL"
+            "\n\n💰Fiyat: 107 TL / 3 adet alımda 64 TL"
             "\n\n🔗 https://www.amazon.com.tr/dp/B0CB49N31Z"
-            "\n\n3 adet alımda 64 TL"
         ))
+        self.assertEqual(composed["body"], "", "fiyat satırı tümüyle tüketilir")
+
+    def test_unlabeled_price_line_with_a_second_price_joins_the_price_row(self):
+        """Emoji/etiket olmasa da satırın devamı fiyat içeriyorsa üst satıra taşınır."""
+        text = "Çay Seti\n33 TL (3 Adet Alımda 22 TL)"
+        composed = bot.compose_message(make_message(text, media=False))
+        self.assertEqual(composed["text"], (
+            "Çay Seti\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+        ))
+        self.assertEqual(composed["body"], "")
 
     def test_leftover_entities_are_remapped_after_consumption(self):
         """Başlık/fiyat silinince kalan satırın biçimi kaymamalı (UTF-16)."""
@@ -2036,7 +2100,7 @@ class ComposeMessageTest(unittest.TestCase):
 
     def test_hidden_cta_label_is_consumed_when_the_header_is_built(self):
         """Başlık varsa gizli link etiketi (CTA) tüketilir; link sabit üst satırda görünür."""
-        text = "Fırsata Git 👉 çay"
+        text = "Fırsata Git 👉 çay 5 TL"
         entity = tl_types.MessageEntityTextUrl(
             offset=0, length=bot.utf16_length("Fırsata Git"), url="https://amzn.to/gizli",
         )
@@ -2045,7 +2109,7 @@ class ComposeMessageTest(unittest.TestCase):
             message_link="https://t.me/FirsatZ/31543",
         )
         self.assertEqual(composed["text"], (
-            "çay\n\n💰Fiyat: Belirtilmemiş\n\n🔗 https://amzn.to/gizli"
+            "çay\n\n💰Fiyat: 5 TL\n\n🔗 https://amzn.to/gizli"
             "\n\n🔗 Mesajı Gör: https://t.me/FirsatZ/31543"
         ))
         self.assertEqual(composed["text"].count("https://amzn.to/gizli"), 1,

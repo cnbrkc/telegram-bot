@@ -1618,7 +1618,6 @@ PRODUCT_LINK_LABEL = "🔗 Ürün fırsat linki:"
 # Sabit bildirim düzeni (kullanıcı isteği): başlık → 💰Fiyat: <fiyat> → 🔗 <ürün linki>.
 MONEY_EMOJI = "💰"
 PRODUCT_LINK_PREFIX = "🔗"
-PRICE_PLACEHOLDER = "Belirtilmemiş"
 
 
 def is_price_line(line: str | None) -> bool:
@@ -1632,23 +1631,50 @@ def is_price_line(line: str | None) -> bool:
     return content.startswith(PRICE_LINE_LABEL)
 
 
-def extract_offer_price(obj: Any) -> str | None:
-    """Kaynak mesajdaki ilk açık para birimli fiyatı aynen çıkar.
+# Kupon/duyuru paylaşımlarında tutar geçebilir ("200 TL üzeri ... kupon") ama
+# bunlar ürün fiyatı değildir; o mesajlar biçime sokulmadan olduğu gibi gider.
+_COUPON_HINT_RE = re.compile(
+    r"\b(?:kupon\w*|(?:indirim|promosyon|hediye)\s*kodu?|coupon|voucher)\b",
+    re.IGNORECASE,
+)
+# "200 TL ve üzeri kargo bedava" bir fiyat değil, eşik ifadesidir.
+_PRICE_THRESHOLD_RE = re.compile(r"\s*(?:ve\s+)?(?:üzeri|üzerinde|üzerine)\b",
+                                 re.IGNORECASE)
 
-    URL'lerin içindeki sayı/para birimi dizileri fiyat sayılmaz
-    (``…/1299-TL-deal`` gibi adresler başlık fiyatını bozmasın); bu yüzden
-    kaynak metin, arama sorgusundaki gibi önce URL'siz taranır.
+
+def _price_candidates(text: str) -> list[re.Match[str]]:
+    """Fiyat olabilecek eşleşmeleri ver; aldatıcı olanları ele.
+
+    Elenenler: URL içindeki sayı/para birimi dizileri (``…/1299-TL-deal``),
+    kupon satırındaki tutarlar (``200 TL üzeri ... kupon``) ve eşik ifadeleri
+    (``200 TL ve üzeri kargo bedava``). Böylece hem başlık fiyatı doğru seçilir
+    hem de kupon paylaşımları yanlışlıkla "ürün fiyatı" sayılmaz.
     """
-    text = message_text(obj)
+    body = text or ""
     url_spans = _merge_spans(
         (match.start(), match.start() + len(match.group(0).rstrip(_URL_TAIL_TRIM)))
-        for match in URL_RE.finditer(text or "")
+        for match in URL_RE.finditer(body)
     )
-    for match in _SEARCH_PRICE_RE.finditer(text or ""):
+    matches: list[re.Match[str]] = []
+    for match in _SEARCH_PRICE_RE.finditer(body):
         if _spans_overlap((match.start(), match.end()), url_spans):
             continue
-        return match.group(0).strip()
-    return None
+        line_end = body.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(body)
+        line_start = body.rfind("\n", 0, match.start()) + 1
+        if _COUPON_HINT_RE.search(body[line_start:line_end]):
+            continue
+        if _PRICE_THRESHOLD_RE.match(body, match.end()):
+            continue
+        matches.append(match)
+    return matches
+
+
+def extract_offer_price(obj: Any) -> str | None:
+    """Kaynak mesajdaki ilk gerçek fiyatı aynen çıkar (bkz. ``_price_candidates``)."""
+    matches = _price_candidates(message_text(obj))
+    return matches[0].group(0).strip() if matches else None
 
 
 def _price_search_service(url: str, label: str = "") -> str | None:
@@ -1727,6 +1753,19 @@ def extract_product_offer_link(obj: Any) -> str | None:
     return max(candidates)[2]
 
 
+# Cimri, Cloudflare korumalı: uzun ve özel karakterli sorgu dizeleri WAF
+# tarafından bloklanabiliyor ("Sorry, you have been blocked"). Kullanıcı
+# isteğiyle Cimri sorgusu ilk iki kelimeye iner; Google Alışveriş ve Akakçe
+# tam sorguyu kullanmaya devam eder.
+CIMRI_QUERY_WORDS = 2
+
+
+def _cimri_search_query(query: str) -> str:
+    """Cimri için kısa sorgu: başlığın ilk ``CIMRI_QUERY_WORDS`` kelimesi."""
+    words = WORD_TOKEN_RE.findall(query or "")
+    return " ".join(words[:CIMRI_QUERY_WORDS])
+
+
 def _price_search_url(service: str, query: str) -> str:
     """Ürün arama adresini kur (query başlık ayıklayıcısından gelir)."""
     query = " ".join((query or "").split())
@@ -1740,7 +1779,9 @@ def _price_search_url(service: str, query: str) -> str:
     if service == "cimri":
         # Cimri'nin arama sonuç sayfası bu yapıyı kullanıyor. Fiyat artan
         # sıralaması en ucuz teklifi üste taşır; virgül URL'de sabit bırakılır.
-        return "https://www.cimri.com/arama?sort=price,asc&q=" + urllib.parse.quote_plus(query)
+        # Sorgu kısadır: uzun ürün adları WAF bloğunu tetikliyor (bkz. yukarı).
+        short = _cimri_search_query(query) or query
+        return "https://www.cimri.com/arama?sort=price,asc&q=" + urllib.parse.quote_plus(short)
     raise ValueError(f"Bilinmeyen fiyat arama hizmeti: {service}")
 
 
@@ -1989,6 +2030,68 @@ def _spans_overlap(
     return any(start < other_end and other_start < end for other_start, other_end in others)
 
 
+# Fiyat satırının etiket kökleri: ``💰 Fiyat : 225 TL``, ``Fiyat: 225 TL``.
+_PRICE_LABEL_ROOTS = ("fiyat", "price")
+
+
+def _price_source_span(source: str, price: str) -> tuple[int, int] | None:
+    """``price`` metninin kaynakta kapladığı aralığı bul (URL/kupon satırını atla)."""
+    target = (price or "").strip()
+    if not target:
+        return None
+    fallback: tuple[int, int] | None = None
+    for match in _price_candidates(source):
+        span = (match.start(), match.end())
+        if match.group(0).strip() == target:
+            return span
+        if fallback is None:
+            fallback = span
+    return fallback
+
+
+def _price_row(source: str, price: str) -> tuple[str, tuple[int, int] | None]:
+    """Üst fiyat satırının metnini ve kaynaktan silinecek aralığı ver.
+
+    Fiyat, etiketli/emojili bir fiyat satırında bulunduysa satırın kalanı da
+    fiyata ait **veridir**: ``🏷️ 33 TL (3 Adet Alımda 22 TL)`` satırının tümü
+    üst satıra taşınır (``33 TL (3 Adet Alımda 22 TL)``) ve satır kaynaktan
+    silinir; kullanıcı isteği: "asıl fiyat 3 adet alımda 22 TL olması, bunu da
+    yukarıda görmeliyim". Etiketsiz bir satırda fiyat başta olsa bile devamı
+    fiyat içeriyorsa yine üste taşınır (``33 TL (22 TL)``). Başka veri içeriyorsa
+    yalnızca fiyat tüketilir, kalanı gövdede kalır: ``129,90 TL Stoklarla
+    sınırlı`` → ``Stoklarla sınırlı`` altta. Satırda URL varsa satır bütün olarak
+    silinmez; link verisi kaybolmaz.
+    """
+    text = (price or "").strip()
+    source = source or ""
+    span = _price_source_span(source, text)
+    if not span:
+        return text, None
+    start, end = span
+    line_start = source.rfind("\n", 0, start) + 1
+    line_end = source.find("\n", end)
+    if line_end < 0:
+        line_end = len(source)
+    content = source[line_start:line_end]
+    if URL_RE.search(content):
+        return text, span  # satırda link var: yalnızca fiyat silinir
+    before = content[: start - line_start]
+    rest = " ".join(content[end - line_start:].split()).strip()
+    labeled = bool(before.strip()) and all(
+        _word_matches(word, _PRICE_LABEL_ROOTS)
+        for word in WORD_TOKEN_RE.findall(before)
+    )
+    # Etiketsiz satır başındaki fiyatın devamı da fiyat içeriyorsa
+    # ("33 TL (3 Adet Alımda 22 TL)") o veri fiyata aittir; başka veri
+    # ("129,90 TL Stoklarla sınırlı") ise gövdede kalır.
+    if not labeled and not (not before.strip() and _SEARCH_PRICE_RE.search(rest)):
+        return text, span
+    row = f"{text} {rest}".strip() if rest else text
+    while row and row[-1] in ".,;:!?…":
+        row = row[:-1].rstrip()
+    return row or text, (line_start, line_end)
+
+
 def _consume_offer_source(
     obj: Any,
     text: str,
@@ -1996,6 +2099,7 @@ def _consume_offer_source(
     title: str,
     price: str | None,
     product_link: str | None,
+    price_span: tuple[int, int] | None = None,
 ) -> tuple[str, list[tuple[str, str, list[tuple[int, int]]]]]:
     """Başlık/fiyat/ürün linkini kaynak metinden çıkar.
 
@@ -2011,10 +2115,10 @@ def _consume_offer_source(
         for match in URL_RE.finditer(source)
     )
     spans: list[tuple[int, int]] = []
-    if price:
-        match = _SEARCH_PRICE_RE.search(source)
-        if match and not _spans_overlap((match.start(), match.end()), url_spans):
-            spans.append((match.start(), match.end()))
+    if price_span is None:
+        price_span = _price_source_span(source, price or "")
+    if price_span and not _spans_overlap(price_span, url_spans):
+        spans.append(price_span)
     if product_link:
         link_span = _visible_link_span(source, product_link) \
             or _hidden_link_span(obj, source, product_link)
@@ -2105,6 +2209,11 @@ def compose_message(
     (kullanıcı isteği: "benim format için orijinalden veriyi al, aldıklarını da
     aldığın yerden sil"). Biçim gereği alınmayan satırlar (örn.
     ``🗓️ 365 Günün En Düşük Fiyatı``) altta aynen korunur: veri kaybı yok.
+    Fiyat satırında ek fiyat verisi varsa (``🏷️ 33 TL (3 Adet Alımda 22 TL)``)
+    hepsi üst fiyat satırına taşınır (bkz. ``_price_row``).
+
+    **İstisna:** kupon/duyuru paylaşımlarında ürün başlığı ve fiyat bulunmaz;
+    o mesajlar biçime sokulmaz, olduğu gibi iletilir (kullanıcı isteği).
     Kaynak mesaj nesnesine hiçbir zaman dokunulmaz; yalnızca kopya yeniden
     kurulur.
 
@@ -2118,15 +2227,19 @@ def compose_message(
     product_title = _search_query(cleaned_obj)
     price = extract_offer_price(cleaned_obj)
     product_link = extract_product_offer_link(cleaned_obj)
-    structured = bool(product_title and (price or product_link))
+    # Sabit düzen YALNIZCA ürün başlığı VE fiyat birlikte varsa kurulur.
+    # Kupon/duyuru paylaşımlarında ikisi de olmaz; onlar olduğu gibi iletilir
+    # (kullanıcı isteği: "istisnai durumlarda bildirimleri olduğu gibi atsın").
+    structured = bool(product_title and price)
 
     summary = ""
     body = source_body
     body_entities = entities_for_text(cleaned_obj, source_body)
     if structured:
+        price_text, price_span = _price_row(source_body, price or "")
         header = [
             product_title,
-            f"{MONEY_EMOJI}{PRICE_LINE_LABEL} {price or PRICE_PLACEHOLDER}",
+            f"{MONEY_EMOJI}{PRICE_LINE_LABEL} {price_text}",
         ]
         if product_link:
             header.append(f"{PRODUCT_LINK_PREFIX} {product_link}")
@@ -2134,6 +2247,7 @@ def compose_message(
         body, steps = _consume_offer_source(
             cleaned_obj, source_body,
             title=product_title, price=price, product_link=product_link,
+            price_span=price_span,
         )
         body_entities = _remap_through_steps(body_entities, steps)
 
@@ -4238,7 +4352,8 @@ async def main(argv: Sequence[str] | None = None) -> int:
     if NOTIFY_BOT_TOKEN:
         log.info("Bildirim biçimi (sabit düzen): başlık → '%s%s <fiyat>' → '%s <ürün linki>' → "
                  "kaynakta alınmayan satırlar + '🔗 %s: <t.me linki>'%s%s (alınan başlık/fiyat/"
-                 "link satırları gövdeden silinir, veri kaybı olmaz).",
+                 "link satırları gövdeden silinir, veri kaybı olmaz; kupon/duyuru paylaşımları "
+                 "başlık/fiyat bulunmadığı için olduğu gibi iletilir).",
                  MONEY_EMOJI, PRICE_LINE_LABEL, PRODUCT_LINK_PREFIX, MESSAGE_LINK_LABEL,
                  " + medya" if NOTIFY_MEDIA else "",
                  " + en altta kalın kaynak adı" if SOURCE_FOOTER else "")

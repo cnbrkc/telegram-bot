@@ -1223,6 +1223,50 @@ class NotificationTest(unittest.TestCase):
         self.assertNotIn("Ürün fırsat linki", delivered, "ataç + link yeter")
         self.assertNotIn("🛍️ Palmolive", delivered, "alınan başlık satırı silinir")
 
+    def test_conditional_price_lands_in_the_price_row_end_to_end(self):
+        """Kullanıcı örneği: 🏷️ 33 TL (3 Adet Alımda 22 TL) üst fiyat satırında görünür."""
+        client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
+                            "include_keywords": []})
+        text = (
+            "Abc Deterjan Çamaşır Sodası (Soda Matik) 500 Gr\n\n"
+            "🏷️ 33 TL (3 Adet Alımda 22 TL)\n\n"
+            "💬 Ortalama fiyatın %31 altında\n\n"
+            "📂 Süpermarket\n\n"
+            "🛍️ Amazon\n\n"
+            "🔗 https://onu.al/feMF"
+        )
+        self._send(client, text, media=False)
+        self.assertEqual(len(self.calls), 1)
+        delivered = self.calls[0]["text"]
+        self.assertEqual(delivered, (
+            "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr"
+            "\n\n💰Fiyat: 33 TL (3 Adet Alımda 22 TL)"
+            "\n\n🔗 https://onu.al/feMF"
+            "\n\n💬 Ortalama fiyatın %31 altında"
+            "\n\n📂 Süpermarket"
+            "\n\n🛍️ Amazon"
+            "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1"
+            "\n\nfirsatz"
+        ))
+        self.assertNotIn("🏷️", delivered, "fiyat etiketi tüketilir")
+        self.assertEqual(delivered.count("33 TL"), 1, "fiyat iki kez yazılmaz")
+        self.assertEqual(delivered.count("22 TL"), 1, "3'lü alım fiyatı korunur")
+
+    def test_coupon_share_is_delivered_as_is(self):
+        """Kupon paylaşımında başlık/fiyat yok: bildirim olduğu gibi gider."""
+        client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
+                            "include_keywords": []})
+        text = (
+            "🎟️ Hopi 200 TL ve üzeri alışverişlerde 50 TL indirim kuponu\n\n"
+            "Kod: HOPI50\n\n"
+            "Son kullanım: 31 Ekim"
+        )
+        self._send(client, text, media=False)
+        self.assertEqual(len(self.calls), 1)
+        delivered = self.calls[0]["text"]
+        self.assertEqual(delivered, text + "\n\n🔗 Mesajı Gör: https://t.me/firsatz/1\n\nfirsatz")
+        self.assertNotIn(bot.PRICE_LINE_LABEL, delivered, "kupon mesajına fiyat satırı eklenmez")
+
     def test_source_name_is_bold_and_has_no_link(self):
         """En alttaki kaynak adı: etiketsiz, linksiz, yalnızca KALIN."""
         client = self._run({"notify_bot_token": "123:ABC"})
@@ -1253,7 +1297,7 @@ class NotificationTest(unittest.TestCase):
     def test_hidden_entity_link_is_shown_once_in_the_fixed_header(self):
         """'Fırsata Git' CTA'sı tüketilir; gizli ürün linki sabit üst satırda bir kez görünür."""
         client = self._run({"notify_bot_token": "123:ABC"})
-        text = "Fırsata Git 👉 çay"
+        text = "Fırsata Git 👉 çay 5 TL"
         entity = types.MessageEntityTextUrl(
             offset=0, length=len("Fırsata Git"), url="https://amzn.to/3xyz",
         )
@@ -1274,7 +1318,7 @@ class NotificationTest(unittest.TestCase):
         client = self._run({"notify_bot_token": "123:ABC", "notify_media": False,
                             "link_appendix": "all"})
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/hepsi")
-        self._send(client, "çay", entities=[entity])
+        self._send(client, "çay 5 TL", entities=[entity])
         text = self.calls[0]["text"]
         self.assertIn("🔗 https://amzn.to/hepsi", text)
         self.assertEqual(text.count("https://amzn.to/hepsi"), 1,
@@ -1284,7 +1328,7 @@ class NotificationTest(unittest.TestCase):
     def test_button_links_become_inline_keyboard(self):
         client = self._run({"notify_bot_token": "123:ABC", "notify_media": False})
         markup = FakeMarkup([FakeRow([FakeButton("Fırsata Git", inner_url="https://amzn.to/btn")])])
-        self._send(client, "Fırsata git 👇 çay", reply_markup=markup)
+        self._send(client, "Fırsata git 👇 çay 5 TL", reply_markup=markup)
         self.assertEqual(self.media_calls, [])
         self.assertEqual(len(self.calls), 1)
         call = self.calls[0]
@@ -1329,10 +1373,10 @@ class NotificationTest(unittest.TestCase):
                             "link_appendix": "off", "message_link": False,
                             "source_footer": False})
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/yok")
-        self._send(client, "çay", entities=[entity])
+        self._send(client, "çay 5 TL", entities=[entity])
         text = self.calls[0]["text"]
         self.assertEqual(text, (
-            "çay\n\n💰Fiyat: Belirtilmemiş\n\n🔗 https://amzn.to/yok"
+            "çay\n\n💰Fiyat: 5 TL\n\n🔗 https://amzn.to/yok"
         ))
         self.assertNotIn("Mesajı Gör", text, "message_link=false yalnızca kaynak mesaj linkini kapatır")
         self.assertNotIn("Fırsatı Gönderen", text)
@@ -1643,7 +1687,7 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
     def test_hidden_entity_link_is_moved_to_the_fixed_header(self):
         """Sabit düzen: gizli link üst satıra alınır, mesaj linki en altta kalır."""
         self.client.fail_modes.update({"forward", "copy", "media", "download"})
-        text = "çay fırsatı – Fırsata Git"
+        text = "çay fırsatı – Fırsata Git 5 TL"
         entity = types.MessageEntityTextUrl(
             offset=text.index("Fırsata Git"), length=len("Fırsata Git"), url="https://amzn.to/gizli",
         )
@@ -1678,7 +1722,7 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
         self.source_id = next(iter(bot.SOURCE_IDS))
         self.client.fail_modes.add("forward")  # metin kopyası incelenecek
         entity = types.MessageEntityTextUrl(offset=0, length=3, url="https://amzn.to/hepsi")
-        self._send("çay fırsatı", entities=[entity])
+        self._send("çay fırsatı 5 TL", entities=[entity])
         delivered = self._texts(self.client)
         self.assertIn("🔗 https://amzn.to/hepsi", delivered)
         self.assertEqual(delivered.count("https://amzn.to/hepsi"), 1)
@@ -1687,7 +1731,7 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
     def test_button_link_is_written_into_copy(self):
         """Kullanıcı hesabı inline klavye gönderemez; link sabit üst satıra yazılmalı."""
         self.client.fail_modes.add("forward")
-        self._send("çay fırsatı", media=False, reply_markup=FakeMarkup([
+        self._send("çay fırsatı 5 TL", media=False, reply_markup=FakeMarkup([
             FakeRow([FakeButton("Fırsata Git", inner_url="https://amzn.to/buton")]),
         ]))
         delivered = self._texts(self.client)
@@ -1774,11 +1818,9 @@ class HiddenLinkDeliveryTest(unittest.TestCase):
         blocks = delivered.split("\n\n")
         self.assertEqual(blocks[:3], [
             "Urban Care Duş Jeli 500 Ml",
-            "💰Fiyat: 107 TL",
+            "💰Fiyat: 107 TL / 3 adet alımda 64 TL",
             "🔗 https://www.amazon.com.tr/dp/B0CB49N31Z",
         ])
-        self.assertIn("3 adet alımda 64 TL", blocks,
-                      "fiyattan artakalan veri (3'lü alım) altta korunmalı")
         self.assertNotIn("💰 Fiyat : 107", delivered, "alınan fiyat satırı gövdede kalmaz")
         self.assertNotIn("Whatsapp", delivered)
         self.assertNotIn("#amazon", delivered)
