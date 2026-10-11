@@ -1595,19 +1595,58 @@ def _search_line_candidate(raw_line: str) -> str:
 SEARCH_QUERY_LIMIT = 200
 
 
+# Fiyat/indirim/tanıtım başlığı kelimeleri: yalnızca bunlardan oluşan satır
+# ürün adı değildir (ör. "DÜŞÜŞÜ", "FİYAT DÜŞÜŞÜ", "Fark", "En düşük fiyat").
+_SEARCH_DEAL_STEMS = ("düş", "dus", "indir", "fiyat", "fark", "dibi", "zirve",
+                      "tasarruf", "ucuz", "en düşük", "en dusuk")
+
+
+def _search_is_deal_word(word: str) -> bool:
+    normalized = normalize(word)
+    return any(normalized.startswith(normalize(stem)) for stem in _SEARCH_DEAL_STEMS)
+
+
+def _search_candidate_score(candidate: str) -> int:
+    """Bir aday satırın ürün adı olma olasılığını yerel olarak puanlar.
+
+    Ağ isteği ya da ek ayrıştırma yoktur; yalnızca satır metni incelenir.
+    """
+    words = [word for word in WORD_TOKEN_RE.findall(candidate)]
+    score = 0
+    if len(words) >= 2:
+        score += 1
+    else:
+        # Tek kelimelik satırlar çoğunlukla mağaza/kategori etiketidir
+        # ("🛍️ Amazon", "📂 Süpermarket"); ürün adı ise genelde çok kelimelidir.
+        score -= 1
+    if ":" in candidate:
+        # "Amazon: 60 günün en düşük" gibi etiketli/istatistik satırları.
+        score -= 2
+    if words and all(_search_is_deal_word(word) for word in words):
+        # Yalnızca fiyat/indirim kelimelerinden oluşan başlık ("DÜŞÜŞÜ").
+        score -= 3
+    return score
+
+
 def _search_query(obj: Any, limit: int = SEARCH_QUERY_LIMIT) -> str:
     """Farklı kaynak şablonlarından ürün adını bulup arama sorgusu kur.
 
-    Fiyat/indirim satırları atlanır; başta fiyat/yüzde, sonda ürün linki olan
-    mesajlarda da ilk ürün adı satırı seçilir. Metin değiştirilmez ve herhangi
-    bir servise istek atılmaz; bildirim yoluna ek gecikme getirmez.
+    Fiyat/indirim satırları atlanır. Adaylar arasından en yüksek puanlı olan
+    seçilir (eşitlikte en üstteki kazanır; tüm adaylar zayıfsa ilk aday
+    korunur, yani eski davranış bozulmaz). Metin değiştirilmez, servise istek
+    atılmaz ve bildirim yoluna ek gecikme getirmez.
     """
     text = URL_RE.sub(" ", message_text(obj))
+    best_candidate = ""
+    best_score = None
     for raw_line in text.splitlines():
         candidate = _search_line_candidate(raw_line)
-        if candidate:
-            return candidate[:limit].strip()
-    return ""
+        if not candidate:
+            continue
+        score = _search_candidate_score(candidate)
+        if best_score is None or score > best_score:
+            best_candidate, best_score = candidate, score
+    return best_candidate[:limit].strip()
 
 
 PRICE_LINE_LABEL = "Fiyat:"

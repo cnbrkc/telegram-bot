@@ -1539,6 +1539,37 @@ class MessageSanitizationTest(unittest.TestCase):
             "Sıcak ÇAY",
         )
 
+    def test_search_query_skips_deal_headline_words_and_picks_product_line(self):
+        """'DÜŞÜŞÜ' gibi fiyat başlıkları ürün adı sayılmaz (ilk satır kör seçilmez)."""
+        message = (
+            "**DÜŞÜŞÜ**\n\n\n\n"
+            "📉 **FİYAT DÜŞÜŞÜ -%29,6**\n\n\n\n"
+            "🛍️ **Restorex Besleyici Bakım Şampuanı 900 Mililitre, 7 Besleyici**\n\n\n\n"
+            "💸 İndirimli Fiyat: **145,00 TL**\n\n"
+            "🔻 Fark: **-%29,6**\n"
+            "❌ Eski Fiyat: ~~206,00 TL~~\n"
+            "🛒 **Amazon: 60 günün en düşük fiyatı**\n"
+            "🏆 **TÜM ZAMANLARIN DİBİ (49 günün)**\n\n"
+            "🔗 [Amazon'da gör](https://www.amazon.com.tr/dp/B0FWR8N18Z?tag=alalal07-21)\n\n"
+            "#Kozmetik@amazonfirsatalarmi"
+        )
+        self.assertEqual(
+            bot._search_query(make_message(message, media=False)),
+            "Restorex Besleyici Bakım Şampuanı 900 Mililitre, 7 Besleyici",
+        )
+
+    def test_search_query_keeps_first_line_when_all_candidates_are_weak(self):
+        """Tüm adaylar zayıfsa eski davranış (ilk aday) korunur."""
+        self.assertEqual(bot._search_query(make_message("Çay\n🛒 Amazon", media=False)), "Çay")
+
+    def test_search_query_prefers_first_multi_word_title_over_store_label(self):
+        self.assertEqual(
+            bot._search_query(make_message(
+                "Abc Deterjan Çamaşır Sodası (Soda Matik) 500 Gr\n🛍️ Amazon", media=False,
+            )),
+            "Abc Deterjan Çamaşır Sodası Soda Matik 500 Gr",
+        )
+
     def test_search_query_drops_inline_call_to_action_words(self):
         self.assertEqual(
             bot._search_query(make_message("Çay fırsatı – Fırsata Git 👇", media=False)),
